@@ -12,6 +12,7 @@ logic there.
 import logging
 import os
 import re
+from dataclasses import dataclass
 
 from backend.config import (
     ANTHROPIC_MODEL,
@@ -20,6 +21,8 @@ from backend.config import (
     GEMINI_MODEL,
     INTENT_CLASSIFY_MAX_ATTEMPTS,
     INTENT_LABELS,
+    VERIFY_BATCH_SIZE,
+    VERIFY_MAX_ATTEMPTS,
 )
 from backend.memory import Turn
 
@@ -133,6 +136,79 @@ CLASSIFY_SYSTEM_PROMPT = (
     "Message: Can you help me with my calculus homework?\n"
     "Category: out_of_scope\n\n"
     "Message: Hey, thanks so much!\nCategory: greeting"
+)
+
+# System prompt for `verify_grounding` -- post-hoc grounding verification
+# (requirements.md §5b, "Grounding/verification score").
+#
+# Framed as an adversarial auditor with UNSUPPORTED as the default verdict.
+# This call is deliberately independent of `generate_answer`: it is a fresh
+# request that never learns the same model authored the answer, so it has no
+# conversational stake in defending it.
+#
+# The load-bearing instruction is the verbatim-evidence requirement. A
+# semantic-only judgment ("does the source support this?") lets a verifier
+# rubber-stamp a fabricated claim by hallucinating support for it; requiring
+# a span copied character-for-character out of the source lets
+# `confidence._evidence_supports` mechanically re-check the citation and
+# downgrade any verdict whose evidence isn't actually there. The model still
+# does the semantic work (so paraphrase like "Rahul Sharma leads AIML" vs.
+# "AIML (Lead: Rahul Sharma)" isn't punished), but it cannot manufacture the
+# citation that licenses a SUPPORTED verdict.
+#
+# The aggregation example is not decoration: an answer that counts an
+# explicit list ("there are 6 teams") is faithful even though the count
+# appears nowhere in the source, and would otherwise be scored a
+# fabrication. Anchoring its evidence to the enumeration keeps the verbatim
+# check intact while allowing the derivation.
+VERIFY_SYSTEM_PROMPT = (
+    "You are a strict grounding auditor. You are given a SOURCE text and an "
+    "ANSWER that was supposedly written using only that SOURCE. Your job is "
+    "to decompose the ANSWER into atomic factual claims and check each one "
+    "against the SOURCE.\n\n"
+    "Rules:\n"
+    "1. An atomic claim asserts exactly ONE fact. Split conjunctions: "
+    '"AIML is led by Rahul Sharma and Web Dev by Priya Patel" is TWO '
+    "claims, not one.\n"
+    "2. Ignore conversational framing that asserts nothing "
+    '("Sure!", "Here you go", "Let me know if you need anything else") -- '
+    "it is not a claim.\n"
+    "3. For each claim output SUPPORTED or UNSUPPORTED. The default is "
+    "UNSUPPORTED. Answer SUPPORTED only if the SOURCE states the claim or "
+    "directly entails it.\n"
+    "4. EVIDENCE must be copied VERBATIM from the SOURCE, character for "
+    "character. Never paraphrase it, never reword it, and never write text "
+    "that does not literally appear in the SOURCE. If you cannot find a "
+    "verbatim span that establishes the claim, the verdict is UNSUPPORTED "
+    "and EVIDENCE is NONE.\n"
+    "5. Counting or aggregating over a list that the SOURCE spells out is "
+    "SUPPORTED -- quote the list itself as the evidence.\n"
+    "6. If the ANSWER makes no factual claim about the club at all (for "
+    "example it says the information is not available), respond with "
+    "exactly NO_CLAIMS and nothing else.\n\n"
+    "Output format -- repeat this block once per claim, nothing else, no "
+    "commentary, no numbering, no blank lines:\n"
+    "CLAIM: <the atomic claim>\n"
+    "VERDICT: SUPPORTED or UNSUPPORTED\n"
+    "EVIDENCE: <verbatim span from the SOURCE, or NONE>\n\n"
+    "Examples:\n\n"
+    "SOURCE: AIML (Lead: Rahul Sharma), Web Dev (Lead: Priya Patel), "
+    "Cloud (Lead: Sneha Gupta)\n"
+    "ANSWER: The AIML team is led by Rahul Sharma, and there are 3 teams "
+    "in total. The AIML team has 40 members.\n"
+    "CLAIM: The AIML team is led by Rahul Sharma\n"
+    "VERDICT: SUPPORTED\n"
+    "EVIDENCE: AIML (Lead: Rahul Sharma)\n"
+    "CLAIM: There are 3 teams in total\n"
+    "VERDICT: SUPPORTED\n"
+    "EVIDENCE: AIML (Lead: Rahul Sharma), Web Dev (Lead: Priya Patel), "
+    "Cloud (Lead: Sneha Gupta)\n"
+    "CLAIM: The AIML team has 40 members\n"
+    "VERDICT: UNSUPPORTED\n"
+    "EVIDENCE: NONE\n\n"
+    "SOURCE: Minimum 2 events/month to stay active.\n"
+    "ANSWER: That detail isn't in the club's knowledge base.\n"
+    "NO_CLAIMS"
 )
 
 # Fixed low temperature for providers that expose the knob, so grounding
@@ -273,6 +349,229 @@ def _parse_batch_intent_labels(raw: str, expected_count: int) -> list[str | None
         if 0 <= index < expected_count:
             labels[index] = _parse_intent_label(match.group(2))
     return labels
+
+
+@dataclass(frozen=True)
+class ClaimVerdict:
+    """One claim as the verifier reported it, parsed but NOT yet trusted.
+
+    This is the raw parse product: `verdict` and `evidence` are whatever the
+    model said. Deciding whether that verdict survives -- in particular
+    re-checking that `evidence` really is a span of the source -- is policy
+    and belongs to `backend.confidence`, not to this provider wrapper (same
+    split as `backend.retrieval`, which scores candidates but never decides
+    refusal).
+    """
+
+    claim: str
+    verdict: str  # "SUPPORTED" | "UNSUPPORTED", as reported
+    evidence: str  # verbatim span as reported, or "" when the model said NONE
+
+
+SUPPORTED_VERDICT = "SUPPORTED"
+UNSUPPORTED_VERDICT = "UNSUPPORTED"
+
+_NO_CLAIMS_MARKER = "NO_CLAIMS"
+_CLAIM_FIELD_RE = re.compile(r"^\s*(CLAIM|VERDICT|EVIDENCE)\s*:\s*(.*?)\s*$", re.IGNORECASE)
+
+
+def _build_verify_message(answer: str, section: str, content: str) -> str:
+    """Build the single user-turn string given to the verification call.
+
+    Only the one retrieved section's text is offered as SOURCE -- the same
+    context `generate_answer` was given, so the verifier judges the answer
+    against exactly what produced it, not against the wider KB.
+    """
+    return f"SOURCE ({section} section): {content}\nANSWER: {answer}"
+
+
+def _parse_claim_verdicts(raw: str) -> list[ClaimVerdict] | None:
+    """Parse a verification response into claim/verdict/evidence triples.
+
+    Returns `[]` for the NO_CLAIMS marker (a real, meaningful result: the
+    answer asserts nothing) and `None` when the response is unparseable (no
+    marker and no claim blocks), which the caller distinguishes because the
+    two demand opposite handling -- `[]` is a scored outcome, `None` is a
+    retry.
+
+    Tolerant by design: a block missing VERDICT counts as UNSUPPORTED (the
+    prompt's stated default), and a missing/NONE EVIDENCE becomes "", which
+    `confidence._evidence_supports` then rejects anyway. A malformed block
+    can therefore only ever cost an answer confidence, never inflate it.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if text.upper().startswith(_NO_CLAIMS_MARKER):
+        return []
+
+    verdicts: list[ClaimVerdict] = []
+    claim: str | None = None
+    verdict = UNSUPPORTED_VERDICT
+    evidence = ""
+
+    def flush() -> None:
+        nonlocal claim, verdict, evidence
+        if claim:
+            verdicts.append(ClaimVerdict(claim=claim, verdict=verdict, evidence=evidence))
+        claim, verdict, evidence = None, UNSUPPORTED_VERDICT, ""
+
+    for line in text.splitlines():
+        match = _CLAIM_FIELD_RE.match(line)
+        if not match:
+            continue
+        field, value = match.group(1).upper(), match.group(2)
+        if field == "CLAIM":
+            flush()
+            claim = value
+        elif field == "VERDICT":
+            verdict = (
+                SUPPORTED_VERDICT
+                if value.strip().upper().startswith(SUPPORTED_VERDICT)
+                else UNSUPPORTED_VERDICT
+            )
+        elif field == "EVIDENCE":
+            evidence = "" if value.strip().upper() == "NONE" else value
+
+    flush()
+    return verdicts or None
+
+
+def verify_grounding(answer: str, section: str, content: str) -> list[ClaimVerdict] | None:
+    """Decompose `answer` into atomic claims and adjudicate each against `content`.
+
+    Returns the parsed claims (possibly `[]` when the answer asserts nothing)
+    or `None` when verification could not be completed -- every attempt
+    failed or returned an unparseable response. Unlike `classify_intent`,
+    this does NOT substitute a safe default value of its own: "we could not
+    verify" and "we verified and found nothing supported" are materially
+    different states, and collapsing them here would hide the first behind
+    the second. `backend.confidence` maps `None` to
+    CONFIDENCE_REASON_VERIFICATION_FAILED.
+
+    Costs one LLM call per invocation (two only if the first response is
+    unparseable) -- see README.md "Quota cost".
+    """
+    provider = os.environ.get("LLM_PROVIDER", DEFAULT_LLM_PROVIDER).strip().lower()
+    generate = _PROVIDERS.get(provider)
+    if generate is None:
+        return None
+
+    message = _build_verify_message(answer, section, content)
+    for attempt in range(VERIFY_MAX_ATTEMPTS):
+        try:
+            raw = generate(message, VERIFY_SYSTEM_PROMPT)
+        except Exception:
+            logger.exception(
+                "llm_client.verify_grounding attempt %d failed for section=%r", attempt + 1, section
+            )
+            continue
+
+        parsed = _parse_claim_verdicts(raw or "")
+        if parsed is not None:
+            return parsed
+        logger.warning(
+            "llm_client.verify_grounding attempt %d returned an unparseable "
+            "response %r for section=%r",
+            attempt + 1,
+            raw,
+            section,
+        )
+
+    return None
+
+
+def _build_batch_verify_message(items: list[tuple[str, str, str]]) -> str:
+    blocks = "\n\n".join(
+        f"ITEM {i}\nSOURCE ({section} section): {content}\nANSWER: {answer}"
+        for i, (answer, section, content) in enumerate(items, start=1)
+    )
+    return (
+        f"Audit each of the following {len(items)} items independently. For "
+        f'each one, emit a line "ITEM <number>" followed by that item\'s '
+        "claim blocks (or NO_CLAIMS) in the format described above. Judge "
+        "each ANSWER only against its own SOURCE. Emit all "
+        f"{len(items)} items, in order, and nothing else.\n\n{blocks}"
+    )
+
+
+def _parse_batch_claim_verdicts(
+    raw: str, expected_count: int
+) -> list[list[ClaimVerdict] | None]:
+    """Split a batched verification response on `ITEM <n>` headers and parse
+    each section, positionally. Positions the model dropped or never emitted
+    stay `None` so the caller can retry only those."""
+    results: list[list[ClaimVerdict] | None] = [None] * expected_count
+    current: int | None = None
+    buffer: list[str] = []
+
+    def flush() -> None:
+        nonlocal current, buffer
+        if current is not None and 0 <= current < expected_count:
+            results[current] = _parse_claim_verdicts("\n".join(buffer))
+        current, buffer = None, []
+
+    for line in (raw or "").splitlines():
+        header = re.match(r"^\s*ITEM\s+(\d+)\s*$", line, re.IGNORECASE)
+        if header:
+            flush()
+            current = int(header.group(1)) - 1
+            continue
+        if current is not None:
+            buffer.append(line)
+
+    flush()
+    return results
+
+
+def verify_groundings_batch(
+    items: list[tuple[str, str, str]],
+) -> list[list[ClaimVerdict] | None]:
+    """Verify many (answer, section, content) triples in as few calls as possible.
+
+    Bulk path for scripts/eval_grounding.py's quota-constrained runs; the
+    production path (`verify_grounding`) stays one answer at a time, since a
+    live turn has no batch to join. Items are chunked at
+    config.VERIFY_BATCH_SIZE so one oversized response can't blow the
+    provider's output token limit and lose the whole run. Never raises;
+    always returns exactly len(items) entries, `None` for any position that
+    could not be verified.
+    """
+    if not items:
+        return []
+
+    provider = os.environ.get("LLM_PROVIDER", DEFAULT_LLM_PROVIDER).strip().lower()
+    generate = _PROVIDERS.get(provider)
+    if generate is None:
+        return [None] * len(items)
+
+    results: list[list[ClaimVerdict] | None] = []
+    for start in range(0, len(items), VERIFY_BATCH_SIZE):
+        chunk = items[start : start + VERIFY_BATCH_SIZE]
+        chunk_results: list[list[ClaimVerdict] | None] = [None] * len(chunk)
+        message = _build_batch_verify_message(chunk)
+
+        for attempt in range(VERIFY_MAX_ATTEMPTS):
+            try:
+                raw = generate(message, VERIFY_SYSTEM_PROMPT)
+            except Exception:
+                logger.exception(
+                    "llm_client.verify_groundings_batch attempt %d failed for %d items",
+                    attempt + 1,
+                    len(chunk),
+                )
+                continue
+
+            for i, parsed in enumerate(_parse_batch_claim_verdicts(raw or "", len(chunk))):
+                if chunk_results[i] is None and parsed is not None:
+                    chunk_results[i] = parsed
+
+            if all(result is not None for result in chunk_results):
+                break
+
+        results.extend(chunk_results)
+
+    return results
 
 
 def _generate_anthropic(user_message: str, system_prompt: str) -> str:

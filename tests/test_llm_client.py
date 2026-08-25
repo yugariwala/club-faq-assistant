@@ -681,3 +681,177 @@ def test_classify_intents_batch_falls_back_to_default_on_unknown_provider(monkey
     result = llm_client.classify_intents_batch(["a", "b"])
 
     assert result == [llm_client.DEFAULT_INTENT_ON_LLM_FAILURE] * 2
+
+
+# ---------------------------------------------------------------------------
+# Grounding verification (Slice 4)
+# ---------------------------------------------------------------------------
+
+TEAMS_SOURCE = "AIML (Lead: Rahul Sharma), Web Dev (Lead: Priya Patel)"
+
+
+def test_verify_grounding_parses_claim_verdict_evidence_triples(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client(
+        "CLAIM: AIML is led by Rahul Sharma\n"
+        "VERDICT: SUPPORTED\n"
+        "EVIDENCE: AIML (Lead: Rahul Sharma)\n"
+        "CLAIM: AIML has 25 members\n"
+        "VERDICT: UNSUPPORTED\n"
+        "EVIDENCE: NONE"
+    )
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.verify_grounding("answer", "Teams", TEAMS_SOURCE)
+
+    assert result == [
+        llm_client.ClaimVerdict(
+            "AIML is led by Rahul Sharma",
+            llm_client.SUPPORTED_VERDICT,
+            "AIML (Lead: Rahul Sharma)",
+        ),
+        llm_client.ClaimVerdict("AIML has 25 members", llm_client.UNSUPPORTED_VERDICT, ""),
+    ]
+
+
+def test_verify_grounding_returns_empty_list_for_the_no_claims_marker(monkeypatch):
+    """`[]` is a real result (the answer asserts nothing), distinct from the
+    `None` that means verification could not be completed."""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("NO_CLAIMS")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.verify_grounding("I don't know.", "Teams", TEAMS_SOURCE)
+
+    assert result == []
+
+
+def test_verify_grounding_returns_none_when_response_is_unparseable(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("I think the answer looks fine to me!")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.verify_grounding("answer", "Teams", TEAMS_SOURCE)
+
+    assert result is None
+    assert client.models.generate_content.call_count == llm_client.VERIFY_MAX_ATTEMPTS
+
+
+def test_verify_grounding_retries_once_then_succeeds(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = MagicMock()
+    client.models.generate_content.side_effect = [
+        SimpleNamespace(text="nonsense"),
+        SimpleNamespace(text="CLAIM: a\nVERDICT: SUPPORTED\nEVIDENCE: AIML"),
+    ]
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.verify_grounding("answer", "Teams", TEAMS_SOURCE)
+
+    assert result == [llm_client.ClaimVerdict("a", llm_client.SUPPORTED_VERDICT, "AIML")]
+    assert client.models.generate_content.call_count == 2
+
+
+def test_verify_grounding_returns_none_when_every_attempt_raises(monkeypatch):
+    """"Could not verify" is never collapsed into "verified nothing" -- the
+    two demand opposite handling in backend.confidence."""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = MagicMock()
+    client.models.generate_content.side_effect = RuntimeError("network down")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.verify_grounding("answer", "Teams", TEAMS_SOURCE)
+
+    assert result is None
+
+
+def test_verify_grounding_returns_none_on_unknown_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+
+    assert llm_client.verify_grounding("answer", "Teams", TEAMS_SOURCE) is None
+
+
+def test_verify_grounding_prompt_contains_only_the_retrieved_section(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("NO_CLAIMS")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        llm_client.verify_grounding("the answer", "Teams", TEAMS_SOURCE)
+
+    sent = client.models.generate_content.call_args.kwargs["contents"]
+    assert TEAMS_SOURCE in sent
+    assert "the answer" in sent
+    # No other KB section leaks into the verifier's context.
+    assert "president@gdgoncampus.com" not in sent
+
+
+def test_verify_grounding_missing_verdict_line_defaults_to_unsupported(monkeypatch):
+    """A malformed block can only ever cost an answer confidence, never
+    inflate it."""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("CLAIM: AIML is led by Rahul Sharma\nEVIDENCE: AIML")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.verify_grounding("answer", "Teams", TEAMS_SOURCE)
+
+    assert result[0].verdict == llm_client.UNSUPPORTED_VERDICT
+
+
+def test_verify_groundings_batch_splits_on_item_headers(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client(
+        "ITEM 1\n"
+        "CLAIM: a\nVERDICT: SUPPORTED\nEVIDENCE: AIML\n"
+        "ITEM 2\n"
+        "NO_CLAIMS"
+    )
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.verify_groundings_batch(
+            [("ans1", "Teams", TEAMS_SOURCE), ("ans2", "Teams", TEAMS_SOURCE)]
+        )
+
+    assert result[0] == [llm_client.ClaimVerdict("a", llm_client.SUPPORTED_VERDICT, "AIML")]
+    assert result[1] == []
+    assert client.models.generate_content.call_count == 1
+
+
+def test_verify_groundings_batch_leaves_dropped_positions_as_none(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("ITEM 1\nCLAIM: a\nVERDICT: SUPPORTED\nEVIDENCE: AIML")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.verify_groundings_batch(
+            [("ans1", "Teams", TEAMS_SOURCE), ("ans2", "Teams", TEAMS_SOURCE)]
+        )
+
+    assert result[0] is not None
+    assert result[1] is None
+
+
+def test_verify_groundings_batch_chunks_at_the_configured_size(monkeypatch):
+    """Quota-shaped behavior: one call per VERIFY_BATCH_SIZE items, not one
+    call per item."""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setattr(llm_client, "VERIFY_BATCH_SIZE", 2)
+    client = _mock_gemini_client("ITEM 1\nNO_CLAIMS\nITEM 2\nNO_CLAIMS")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.verify_groundings_batch(
+            [("a", "Teams", TEAMS_SOURCE)] * 4
+        )
+
+    assert len(result) == 4
+    assert client.models.generate_content.call_count == 2
+
+
+def test_verify_groundings_batch_returns_empty_for_empty_input():
+    assert llm_client.verify_groundings_batch([]) == []
+
+
+def test_verify_groundings_batch_returns_none_entries_on_unknown_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+
+    result = llm_client.verify_groundings_batch([("a", "Teams", TEAMS_SOURCE)] * 3)
+
+    assert result == [None, None, None]

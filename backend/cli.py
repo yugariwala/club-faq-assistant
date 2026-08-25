@@ -46,7 +46,7 @@ def main() -> None:
     # REPL run; pass it to every answer_question call").
     session_id = uuid.uuid4().hex
 
-    print("GDG On Campus Club FAQ Assistant (Slice 3: intent classification)")
+    print("GDG On Campus Club FAQ Assistant (Slice 4: confidence scoring)")
     print("Ask a question about the club, or type 'quit' / 'exit' to stop.\n")
 
     while True:
@@ -74,6 +74,18 @@ def main() -> None:
                 "[source={} | score={:.3f}]".format(result.source_section, result.score)
             )
         print("[intent={} | path={}]".format(result.intent, result.intent_path))
+        if result.confidence:
+            # Band and raw score together -- the band alone hides how close a
+            # `medium` sat to either edge, and the sub-scores say which
+            # signal limited the composite.
+            print("[confidence={}]".format(result.confidence.display()))
+            if result.confidence.claims:
+                print(
+                    "[grounding={}/{} claims verified]".format(
+                        result.confidence.supported_claims,
+                        len(result.confidence.claims),
+                    )
+                )
         print()
 
 

@@ -4,7 +4,9 @@
 run with no terminal interaction, no network access, and no ANTHROPIC_API_KEY.
 """
 
+from backend import config
 from backend.cli import main
+from backend.confidence import ConfidenceResult, VerifiedClaim
 from backend.qa import AnswerResult
 
 
@@ -199,3 +201,75 @@ def test_startup_prints_no_warning_when_api_key_present(monkeypatch, capsys):
     result = _run_cli(["quit"], monkeypatch, capsys, fake_answer_question)
 
     assert "WARNING" not in result.out
+
+
+# ---------------------------------------------------------------------------
+# Confidence display (Slice 4)
+# ---------------------------------------------------------------------------
+
+
+def test_confidence_band_and_raw_score_are_both_printed(monkeypatch, capsys):
+    """The band alone hides how close a `medium` sat to either edge, so both
+    are always shown (spec: "Display the band and the raw score")."""
+    claims = (
+        VerifiedClaim("Rahul Sharma leads AIML", True, "AIML (Lead: Rahul Sharma)", True),
+        VerifiedClaim("AIML has 25 members", False, "", False),
+    )
+
+    def fake_answer_question(query, session_id):
+        return AnswerResult(
+            answer="Rahul Sharma leads AIML.",
+            source_section="Teams",
+            score=0.693,
+            refused=False,
+            intent="faq",
+            intent_path="rule",
+            confidence=ConfidenceResult(
+                score=0.5,
+                band=config.CONFIDENCE_BAND_MEDIUM_NAME,
+                reason=config.CONFIDENCE_REASON_VERIFIED,
+                retrieval_score=0.89,
+                grounding_score=0.5,
+                claims=claims,
+            ),
+        )
+
+    result = _run_cli(["Who leads AIML?", "quit"], monkeypatch, capsys, fake_answer_question)
+
+    assert config.CONFIDENCE_BAND_MEDIUM_NAME in result.out
+    assert "0.50" in result.out
+    assert "1/2 claims verified" in result.out
+
+
+def test_not_applicable_confidence_prints_its_reason_and_no_score(monkeypatch, capsys):
+    def fake_answer_question(query, session_id):
+        return AnswerResult(
+            answer=config.REFUSAL_MESSAGE,
+            source_section=None,
+            score=0.0,
+            refused=True,
+            intent="out_of_scope",
+            intent_path="llm",
+            confidence=ConfidenceResult(
+                score=None,
+                band=config.CONFIDENCE_BAND_NOT_APPLICABLE_NAME,
+                reason=config.CONFIDENCE_REASON_REFUSED,
+            ),
+        )
+
+    result = _run_cli(["What's the budget?", "quit"], monkeypatch, capsys, fake_answer_question)
+
+    assert config.CONFIDENCE_BAND_NOT_APPLICABLE_NAME in result.out
+    assert config.CONFIDENCE_REASON_REFUSED in result.out
+    assert "claims verified" not in result.out
+
+
+def test_cli_tolerates_a_result_without_confidence(monkeypatch, capsys):
+    """`confidence` defaults to None so pre-Slice-4 construction still works."""
+
+    def fake_answer_question(query, session_id):
+        return AnswerResult(answer="stub", source_section="Teams", score=0.5, refused=False)
+
+    result = _run_cli(["Who leads AIML?", "quit"], monkeypatch, capsys, fake_answer_question)
+
+    assert "stub" in result.out

@@ -429,3 +429,126 @@ def test_intent_and_path_are_logged_per_turn(caplog):
 
     records = [r.getMessage() for r in caplog.records]
     assert any("intent='faq'" in m and "intent_path='rule'" in m for m in records)
+
+
+# ---------------------------------------------------------------------------
+# Confidence scoring (Slice 4)
+# ---------------------------------------------------------------------------
+
+
+def _verdict(claim, verdict, evidence):
+    return llm_client.ClaimVerdict(claim=claim, verdict=verdict, evidence=evidence)
+
+
+def test_grounded_answer_carries_a_scored_confidence():
+    verdicts = [
+        _verdict(
+            "The AIML team is led by Rahul Sharma",
+            llm_client.SUPPORTED_VERDICT,
+            "AIML (Lead: Rahul Sharma)",
+        )
+    ]
+    with patch("backend.qa.llm_client.generate_answer", return_value="Rahul Sharma leads AIML."):
+        with patch("backend.confidence.llm_client.verify_grounding", return_value=verdicts):
+            result = answer_question("Who leads the AIML team?", session_id="test-conf-grounded")
+
+    assert result.confidence is not None
+    assert result.confidence.reason == config.CONFIDENCE_REASON_VERIFIED
+    assert result.confidence.score is not None
+    assert result.confidence.grounding_score == 1.0
+    assert result.confidence.band == config.CONFIDENCE_BAND_HIGH_NAME
+
+
+def test_fabricated_claim_pulls_confidence_below_the_high_band():
+    """The property the whole slice exists to deliver: an answer the source
+    doesn't support must not be badged confident, however well it retrieved."""
+    verdicts = [
+        _verdict(
+            "The AIML team is led by Rahul Sharma",
+            llm_client.SUPPORTED_VERDICT,
+            "AIML (Lead: Rahul Sharma)",
+        ),
+        _verdict("The AIML team has 25 members", llm_client.UNSUPPORTED_VERDICT, ""),
+    ]
+    with patch("backend.qa.llm_client.generate_answer", return_value="... 25 members."):
+        with patch("backend.confidence.llm_client.verify_grounding", return_value=verdicts):
+            result = answer_question("Who leads AIML?", session_id="test-conf-fabricated")
+
+    assert result.confidence.grounding_score == 0.5
+    assert result.confidence.band != config.CONFIDENCE_BAND_HIGH_NAME
+
+
+def test_refusal_carries_a_not_applicable_confidence_and_never_verifies():
+    """A correct refusal makes no claim about the club, so it is unscored --
+    not scored zero -- and costs no verification call."""
+    with patch("backend.confidence.llm_client.verify_grounding") as mock_verify:
+        with patch("backend.qa.intent.classify", return_value=IntentResult("out_of_scope", "llm")):
+            result = answer_question("What's the club's budget?", session_id="test-conf-refusal")
+
+    mock_verify.assert_not_called()
+    assert result.confidence.score is None
+    assert result.confidence.band == config.CONFIDENCE_BAND_NOT_APPLICABLE_NAME
+    assert result.confidence.reason == config.CONFIDENCE_REASON_REFUSED
+
+
+def test_llm_error_answer_is_not_applicable_not_low_confidence():
+    with patch(
+        "backend.qa.llm_client.generate_answer", side_effect=llm_client.LLMProviderError("boom")
+    ):
+        with patch("backend.confidence.llm_client.verify_grounding") as mock_verify:
+            result = answer_question("Who leads the AIML team?", session_id="test-conf-llm-error")
+
+    mock_verify.assert_not_called()
+    assert result.answer == config.LLM_ERROR_MESSAGE
+    assert result.confidence.reason == config.CONFIDENCE_REASON_LLM_ERROR
+    assert result.confidence.band == config.CONFIDENCE_BAND_NOT_APPLICABLE_NAME
+
+
+def test_quota_error_answer_carries_its_own_confidence_reason():
+    with patch(
+        "backend.qa.llm_client.generate_answer", side_effect=llm_client.LLMQuotaError("429")
+    ):
+        result = answer_question("Who leads the AIML team?", session_id="test-conf-quota")
+
+    assert result.answer == config.LLM_QUOTA_MESSAGE
+    assert result.confidence.reason == config.CONFIDENCE_REASON_LLM_QUOTA
+
+
+def test_verification_disabled_skips_the_extra_call_on_a_grounded_turn(monkeypatch):
+    monkeypatch.setenv(config.VERIFY_GROUNDING_ENV_VAR, "0")
+
+    with patch("backend.qa.llm_client.generate_answer", return_value="Rahul Sharma leads AIML."):
+        with patch("backend.confidence.llm_client.verify_grounding") as mock_verify:
+            result = answer_question("Who leads the AIML team?", session_id="test-conf-disabled")
+
+    mock_verify.assert_not_called()
+    assert result.confidence.reason == config.CONFIDENCE_REASON_VERIFICATION_DISABLED
+    assert result.confidence.grounding_score is None
+
+
+def test_confidence_is_logged_per_turn(caplog):
+    verdicts = [
+        _verdict("a", llm_client.SUPPORTED_VERDICT, "AIML (Lead: Rahul Sharma)"),
+    ]
+    with caplog.at_level(logging.INFO, logger="backend.qa"):
+        with patch("backend.qa.llm_client.generate_answer", return_value="Rahul Sharma leads AIML."):
+            with patch("backend.confidence.llm_client.verify_grounding", return_value=verdicts):
+                answer_question("Who leads the AIML team?", session_id="test-conf-logged")
+
+    logged = caplog.text
+    assert "confidence_band=" in logged
+    assert "confidence_score=" in logged
+    assert "retrieval_score=" in logged
+    assert "grounding_score=" in logged
+
+
+def test_raw_score_field_is_untouched_by_confidence_scoring():
+    """`AnswerResult.score` stays the raw cosine the refusal gate reads;
+    confidence lives on its own field and never overwrites it."""
+    verdicts = [_verdict("a", llm_client.SUPPORTED_VERDICT, "AIML (Lead: Rahul Sharma)")]
+    with patch("backend.qa.llm_client.generate_answer", return_value="Rahul Sharma leads AIML."):
+        with patch("backend.confidence.llm_client.verify_grounding", return_value=verdicts):
+            result = answer_question("Who leads the AIML team?", session_id="test-conf-raw-score")
+
+    assert result.score >= config.RETRIEVAL_THRESHOLD
+    assert result.score != result.confidence.score

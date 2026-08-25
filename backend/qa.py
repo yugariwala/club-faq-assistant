@@ -8,7 +8,8 @@ layer (spec: Code Map).
 import logging
 from dataclasses import dataclass
 
-from backend import config, intent, llm_client
+from backend import config, confidence, intent, llm_client
+from backend.confidence import ConfidenceResult
 from backend.memory import SessionStore, Turn
 from backend.retrieval import RetrievalResult, TfidfRetriever
 
@@ -25,11 +26,19 @@ _session_store = SessionStore()
 class AnswerResult:
     """Uniform result shape for every answer path, grounded or refused
     (spec: "Every answer path ... returns a uniform result shape: answer,
-    source_section, score, refused flag"). `rewritten_query`, `intent`, and
-    `intent_path` default to "" so existing keyword-arg construction (e.g.
-    in tests/test_cli.py) that doesn't pass them keeps working unchanged.
-    `intent` is one of config.INTENT_LABELS; `intent_path` is "rule" or
-    "llm", recording which layer of backend/intent.py resolved it."""
+    source_section, score, refused flag"). `rewritten_query`, `intent`,
+    `intent_path`, and `confidence` all default to empty/None so existing
+    keyword-arg construction (e.g. in tests/test_cli.py) that doesn't pass
+    them keeps working unchanged. `intent` is one of config.INTENT_LABELS;
+    `intent_path` is "rule" or "llm", recording which layer of
+    backend/intent.py resolved it.
+
+    `score` remains the raw top-1 cosine similarity -- the refusal gate's
+    input -- and is deliberately NOT the confidence number; see
+    `confidence.retrieval_confidence` for why raw magnitude makes a poor
+    graded signal on this corpus. `confidence` carries the scored indicator:
+    band, composite score, and both sub-scores.
+    """
 
     answer: str
     source_section: str | None
@@ -38,6 +47,7 @@ class AnswerResult:
     rewritten_query: str = ""
     intent: str = ""
     intent_path: str = ""
+    confidence: ConfidenceResult | None = None
 
 
 def answer_question(
@@ -110,6 +120,7 @@ def answer_question(
             rewritten_query=rewritten_query,
             intent=intent_result.label,
             intent_path=intent_result.path,
+            confidence=confidence.not_applicable(config.CONFIDENCE_REASON_REFUSED),
         )
     else:
         try:
@@ -131,6 +142,10 @@ def answer_question(
                 rewritten_query=rewritten_query,
                 intent=intent_result.label,
                 intent_path=intent_result.path,
+                confidence=confidence.not_applicable(
+                    config.CONFIDENCE_REASON_LLM_QUOTA,
+                    retrieval_score=confidence.retrieval_confidence(candidates),
+                ),
             )
         except Exception:
             # Any other failure reaching or parsing the LLM (auth, network,
@@ -151,8 +166,16 @@ def answer_question(
                 rewritten_query=rewritten_query,
                 intent=intent_result.label,
                 intent_path=intent_result.path,
+                confidence=confidence.not_applicable(
+                    config.CONFIDENCE_REASON_LLM_ERROR,
+                    retrieval_score=confidence.retrieval_confidence(candidates),
+                ),
             )
         else:
+            # Verification runs only here, on a real generated answer. The
+            # branches above return fixed constant strings that assert
+            # nothing about the club, so there is nothing to verify and no
+            # extra LLM call is spent on them.
             result = AnswerResult(
                 answer=answer_text,
                 source_section=top.section,
@@ -161,7 +184,30 @@ def answer_question(
                 rewritten_query=rewritten_query,
                 intent=intent_result.label,
                 intent_path=intent_result.path,
+                confidence=confidence.score_generated_answer(
+                    answer=answer_text,
+                    section=top.section,
+                    content=top.content,
+                    candidates=candidates,
+                ),
             )
+
+    # Logged after the branches, since confidence isn't known until the
+    # answer exists. Both sub-scores are recorded alongside the composite so
+    # a turn's log says *why* confidence was what it was -- a band alone
+    # can't distinguish a weak retrieval from an ungrounded answer (spec:
+    # requirements.md §3.2 "Confidence and intent are logged per-turn, not
+    # just displayed and discarded").
+    logger.info(
+        "session_id=%r confidence_band=%r confidence_score=%r "
+        "confidence_reason=%r retrieval_score=%r grounding_score=%r",
+        session_id,
+        result.confidence.band if result.confidence else None,
+        result.confidence.score if result.confidence else None,
+        result.confidence.reason if result.confidence else None,
+        result.confidence.retrieval_score if result.confidence else None,
+        result.confidence.grounding_score if result.confidence else None,
+    )
 
     active_store.add_turn(
         session_id,

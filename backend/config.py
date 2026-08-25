@@ -77,3 +77,67 @@ DEFAULT_INTENT_ON_LLM_FAILURE: str = "out_of_scope"
 # make against the LLM before giving up and returning
 # DEFAULT_INTENT_ON_LLM_FAILURE for whatever couldn't be parsed.
 INTENT_CLASSIFY_MAX_ATTEMPTS: int = 2
+
+# --- Confidence scoring (requirements.md §3.2, §5b "Composite") -------------
+
+# Band names for the displayed confidence indicator. NOT_APPLICABLE is used
+# when the response makes no factual claim about the club at all (a refusal,
+# an LLM-error message, or a generated "the context doesn't say") -- see
+# CONFIDENCE_REASON_* below. Scoring such a response 0.0 would badge the
+# bot's most trustworthy behavior as untrustworthy; scoring it 1.0 would
+# assert a verification that never ran.
+CONFIDENCE_BAND_HIGH_NAME: str = "high"
+CONFIDENCE_BAND_MEDIUM_NAME: str = "medium"
+CONFIDENCE_BAND_LOW_NAME: str = "low"
+CONFIDENCE_BAND_NOT_APPLICABLE_NAME: str = "not_applicable"
+
+# Score at or above which a response is banded `high`. Grounding score is
+# supported/total claims, so with the 1-6 claims a concise FAQ answer
+# typically yields, 0.85 is the threshold at which a single unsupported
+# claim can no longer reach `high` (4/5 = 0.80, 5/6 = 0.83, both `medium`).
+# A lower bar such as 0.75 would badge a 3-of-4 answer -- one fabricated
+# claim -- as high confidence, which is the exact failure the eval set in
+# data/grounding_eval.jsonl exists to catch.
+CONFIDENCE_BAND_HIGH: float = 0.85
+
+# Score at or above which a response is banded `medium`; below it, `low`.
+# Reads as "at least half the answer's claims were verified against source".
+CONFIDENCE_BAND_MEDIUM: float = 0.50
+
+# Why a confidence score is what it is. Attached to every scored response so
+# a `not_applicable` band can be told apart from a genuinely low-confidence
+# one, and so the Slice 5 dashboard can bucket these states separately
+# rather than lumping every unscored turn together.
+CONFIDENCE_REASON_VERIFIED: str = "verified"
+CONFIDENCE_REASON_REFUSED: str = "refused"
+CONFIDENCE_REASON_LLM_ERROR: str = "llm_error"
+CONFIDENCE_REASON_LLM_QUOTA: str = "llm_quota"
+CONFIDENCE_REASON_NO_CLAIMS: str = "no_claims"
+CONFIDENCE_REASON_VERIFICATION_DISABLED: str = "verification_disabled"
+CONFIDENCE_REASON_VERIFICATION_FAILED: str = "verification_failed"
+
+# Whether post-hoc grounding verification runs by default. Verification adds
+# exactly one LLM call per grounded turn (see README.md "Quota cost"), which
+# matters on a free Gemini key capped at 20 requests/day. Overridable at call
+# time via the VERIFY_GROUNDING env var so a quota-constrained demo can turn
+# it off without editing code; with it off, the reported confidence is the
+# retrieval signal alone and is labeled `verification_disabled` so a
+# degraded signal is never presented as a full composite.
+CONFIDENCE_VERIFICATION_ENABLED: bool = True
+VERIFY_GROUNDING_ENV_VAR: str = "VERIFY_GROUNDING"
+
+# How many answers `llm_client.verify_groundings_batch` packs into a single
+# call. Bulk path for scripts/eval_grounding.py only (the production path
+# verifies one answer at a time -- a live turn has no batch to join), same
+# precedent as classify_intents_batch. Bounded well below the eval set size
+# so one oversized response can't exceed the provider's output token limit
+# and lose the whole run.
+VERIFY_BATCH_SIZE: int = 6
+
+# Attempts (including the first) verify_grounding/verify_groundings_batch
+# make before giving up. A retry costs another LLM call, so this is
+# deliberately low: the strict CLAIM/VERDICT/EVIDENCE output format makes an
+# unparseable response rare, and the give-up path is already safe
+# (CONFIDENCE_REASON_VERIFICATION_FAILED bands the answer `low` rather than
+# letting an unverified answer look confident).
+VERIFY_MAX_ATTEMPTS: int = 2

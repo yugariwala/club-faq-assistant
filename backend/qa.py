@@ -55,6 +55,7 @@ def answer_question(
     session_id: str,
     retriever: TfidfRetriever | None = None,
     session_store: SessionStore | None = None,
+    precomputed_intent: intent.IntentResult | None = None,
 ) -> AnswerResult:
     """Answer `query` strictly from the KB, or refuse if nothing is relevant enough.
 
@@ -93,8 +94,13 @@ def answer_question(
     # Classified on the original raw message, not the rewritten form --
     # intent is about what the user actually typed, independent of the
     # internal retrieval-oriented rewrite (spec: Slice 3 requirements.md
-    # §3.2 "every user message is tagged with a category").
-    intent_result = intent.classify(query)
+    # §3.2 "every user message is tagged with a category"). A caller that
+    # already classified this query (backend.actions' router, deciding
+    # whether to route here at all) passes that result through instead of
+    # paying for a second classify() call on the same text (Slice 5 quota
+    # note: this is the one place that would otherwise double the per-turn
+    # classification cost for every non-action message).
+    intent_result = precomputed_intent if precomputed_intent is not None else intent.classify(query)
 
     # Original/rewritten query, classified intent, and which path resolved
     # it are all logged every turn (spec: Boundaries & Constraints; Slice 3

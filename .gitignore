@@ -4,3 +4,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.log
+
+# Runtime action records (backend/actions.py ActionRecordStore) -- generated
+# per run/demo, not a committed fixture (unlike data/*_eval.jsonl, which are
+# hand-labeled eval sets checked in on purpose).
+data/actions_log.jsonl

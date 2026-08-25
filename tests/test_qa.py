@@ -542,6 +542,37 @@ def test_confidence_is_logged_per_turn(caplog):
     assert "grounding_score=" in logged
 
 
+# ---------------------------------------------------------------------------
+# precomputed_intent passthrough (Slice 5 -- backend.actions' router classifies
+# once and threads the result through so a non-action turn is never
+# classified twice).
+# ---------------------------------------------------------------------------
+
+
+def test_precomputed_intent_skips_a_fresh_classify_call():
+    with patch("backend.qa.intent.classify") as mock_classify:
+        with patch("backend.qa.llm_client.generate_answer", return_value="Rahul Sharma."):
+            result = answer_question(
+                "Who leads the AIML team?",
+                session_id="test-precomputed-intent",
+                precomputed_intent=IntentResult(label="faq", path="rule"),
+            )
+
+    mock_classify.assert_not_called()
+    assert result.intent == "faq"
+    assert result.intent_path == "rule"
+
+
+def test_no_precomputed_intent_falls_back_to_classifying_as_before():
+    """Default (no precomputed_intent passed) must behave exactly as every
+    existing call site already expects -- unchanged classify() call."""
+    with patch("backend.qa.llm_client.generate_answer", return_value="Rahul Sharma."):
+        result = answer_question("Who leads the AIML team?", session_id="test-no-precomputed-intent")
+
+    assert result.intent == "faq"
+    assert result.intent_path == "rule"
+
+
 def test_raw_score_field_is_untouched_by_confidence_scoring():
     """`AnswerResult.score` stays the raw cosine the refusal gate reads;
     confidence lives on its own field and never overwrites it."""

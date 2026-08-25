@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 
 from backend import llm_client  # noqa: E402 -- after load_dotenv(), see module docstring
-from backend.qa import answer_question  # noqa: E402 -- after load_dotenv(), see module docstring
+from backend.actions import handle_turn  # noqa: E402 -- after load_dotenv(), see module docstring
 
 
 def main() -> None:
@@ -46,7 +46,7 @@ def main() -> None:
     # REPL run; pass it to every answer_question call").
     session_id = uuid.uuid4().hex
 
-    print("GDG On Campus Club FAQ Assistant (Slice 4: confidence scoring)")
+    print("GDG On Campus Club FAQ Assistant (Slice 5: agentic actions)")
     print("Ask a question about the club, or type 'quit' / 'exit' to stop.\n")
 
     while True:
@@ -61,7 +61,7 @@ def main() -> None:
         if not query:
             continue
 
-        result = answer_question(query, session_id)
+        result = handle_turn(query, session_id)
 
         if result.rewritten_query and result.rewritten_query != query:
             print("[rewritten: {}]".format(result.rewritten_query))
@@ -69,6 +69,11 @@ def main() -> None:
         print(result.answer)
         if result.refused:
             print("[refused | no source | score={:.3f}]".format(result.score))
+        elif result.source_section is None:
+            # Agentic-action turn (Slice 5) -- no KB section grounds a
+            # prompt/confirmation/completion message, and printing
+            # "source=None" would read as a bug rather than as intentional.
+            print("[action]")
         else:
             print(
                 "[source={} | score={:.3f}]".format(result.source_section, result.score)

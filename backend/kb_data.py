@@ -62,3 +62,53 @@ KB_ENTRIES: list[dict] = [
         ),
     },
 ]
+
+# Structured events, for Slice 5 agentic-action validation (requirements.md
+# §3.3 "Actions only reference real KB entities"). Additive alongside
+# KB_ENTRIES above -- the Events section's retrieval/citation text stays
+# verbatim; this is the same six events, parsed into fields an action can
+# actually check ("is this a real event", "is it Upcoming") without doing
+# NLP over the prose blob at request time.
+#
+# `aliases` are the lowercase phrases `backend.actions._match_event` accepts
+# as naming this event in free text -- deliberately short and forgiving
+# ("hackfest" as well as "hackfest 2025") since conversational replies rarely
+# use the full official name.
+EVENTS: list[dict] = [
+    {
+        "name": "Intro to GenAI Workshop",
+        "date": "Sept 15",
+        "status": "Upcoming",
+        "aliases": ("intro to genai workshop", "genai workshop", "genai"),
+    },
+    {
+        "name": "HackFest 2025",
+        "date": "Oct 10",
+        "status": "Upcoming",
+        "aliases": ("hackfest 2025", "hackfest"),
+    },
+    {
+        "name": "Cloud Study Jam",
+        "date": "Sept 20",
+        "status": "Upcoming",
+        "aliases": ("cloud study jam",),
+    },
+    {
+        "name": "Flutter Forward",
+        "date": "Aug 30",
+        "status": "Completed",
+        "aliases": ("flutter forward",),
+    },
+    {
+        "name": "CyberCTF Challenge",
+        "date": "Nov 5",
+        "status": "Upcoming",
+        "aliases": ("cyberctf challenge", "cyberctf", "cyber ctf"),
+    },
+    {
+        "name": "Design Thinking Bootcamp",
+        "date": "Sept 25",
+        "status": "Upcoming",
+        "aliases": ("design thinking bootcamp", "design thinking"),
+    },
+]

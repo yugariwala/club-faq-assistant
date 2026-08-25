@@ -141,3 +141,38 @@ VERIFY_BATCH_SIZE: int = 6
 # (CONFIDENCE_REASON_VERIFICATION_FAILED bands the answer `low` rather than
 # letting an unverified answer look confident).
 VERIFY_MAX_ATTEMPTS: int = 2
+
+# --- Agentic actions (requirements.md §3.3, Slice 5) ------------------------
+
+# Confidence reason attached to every action-turn AnswerResult (start,
+# slot-fill prompt, confirmation, completion, or abandonment). Action turns
+# make no factual claim about the club, so -- like a refusal -- they are
+# `not_applicable`, with their own reason code so the dashboard can tell an
+# action turn apart from a refusal/LLM-error at a glance.
+CONFIDENCE_REASON_ACTION_TURN: str = "action_turn"
+
+# Status values on a persisted action record (backend/actions.py
+# ActionRecordStore). `completed` only after the user explicitly confirms;
+# `abandoned` covers an explicit cancel, a rejected confirmation, and the
+# idle-timeout safety net below -- all three are recorded so the dashboard
+# can distinguish "finished" from "started but never finished".
+ACTION_STATUS_COMPLETED: str = "completed"
+ACTION_STATUS_ABANDONED: str = "abandoned"
+
+# How many consecutive no-forward-progress turns (an unrelated interruption,
+# or a slot attempt that failed validation) an in-progress action tolerates
+# before it is auto-abandoned. An explicit "cancel" always works immediately
+# regardless of this counter; this is the safety net for the case the spec
+# calls out as where these systems "usually break" -- a user who wanders off
+# mid-action without ever typing cancel, leaving state open indefinitely.
+# 6 is generous enough that a couple of genuine asides or a fumbled email
+# format never trip it, while still bounding the worst case.
+ACTION_IDLE_TURN_LIMIT: int = 6
+
+# Directory/filename for the persisted action-record log (JSON Lines, one
+# record per completed/abandoned action). Resolved relative to the project
+# root by backend/actions.py, not to the process's current working
+# directory, so the log lands in the same place regardless of where the CLI
+# or test suite is invoked from.
+ACTIONS_LOG_DIR: str = "data"
+ACTIONS_LOG_FILENAME: str = "actions_log.jsonl"

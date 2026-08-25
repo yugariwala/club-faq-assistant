@@ -8,6 +8,7 @@ every message with an intent category.
 - **Slice 2** — multi-turn memory (pronoun/ellipsis resolution across turns).
 - **Slice 3** — hybrid intent classification (rules + LLM fallback).
 - **Slice 4** — composite confidence scoring (retrieval separation + grounding verification).
+- **Slice 5** — agentic actions (event registration, feedback submission).
 
 ## Setup
 
@@ -38,6 +39,8 @@ with more headroom. Per-turn cost:
 | Grounded, first turn of a session | **2** | generate + verify |
 | Grounded follow-up (has history) | **3** | rewrite + generate + verify |
 | \+ ambiguous intent (rules abstain) | **+1** | LLM intent fallback |
+| Action turn (start, slot fill, confirm, cancel) | **0** | pure regex/rule state machine — see [Agentic actions](#agentic-actions-slice-5) |
+| Action turn, interrupted by a real question | same as that question's own row above | the aside is answered exactly like any other turn; the action's own bookkeeping adds nothing |
 
 Grounding verification (Slice 4) is the `verify` call and is the one you can
 turn off: set `VERIFY_GROUNDING=0` to drop it, roughly doubling how many
@@ -330,3 +333,138 @@ categories correctly given a correct verifier, fabricated items never reach
 and the INCOMPLETE RUN guard fires when it should. Those tests prove the
 machinery; only the live run can measure how good the LLM verifier itself
 is.
+
+## Agentic actions (Slice 5)
+
+Two actions, end to end: **event registration** and **feedback submission**
+(`backend/actions.py`). `backend.cli` now calls `actions.handle_turn` instead
+of `qa.answer_question` directly — it routes a session either into the
+action state machine below or straight through to unchanged Slice 1–4
+Q&A, and always returns the same `AnswerResult` shape either way, so the
+CLI's display code needed no new branches beyond an `[action]` tag in place
+of a KB `source=`.
+
+### Slot-filling
+
+Each action declares its required slots, in priority order:
+
+| Action | Slots |
+|---|---|
+| `register` | `event`, `name`, `email` |
+| `feedback` | `event`, `feedback_text` |
+
+The opening message is parsed for whatever it already gives — "Register me
+for HackFest" fills `event` and asks only for `name` next, never re-asking
+for the event. Extraction is regex/keyword only: an event alias match, an
+email regex, and (for the two free-text slots) an explicit lead-in phrase
+("my name is X") on the opening message, or the whole reply on a direct
+follow-up. The free-text fallback deliberately does **not** apply to the
+opening message itself — grabbing whatever's left after "register me for
+HackFest" would silently mis-fill `name` with the request sentence.
+
+### State machine
+
+One `ActiveAction` per session (`stage`: `collecting` → `confirming` →
+terminal), held in memory until it completes or is abandoned. Every turn
+while one is active is checked in a fixed order: explicit cancel, then a
+switch-to-a-different-action attempt, then stage-specific logic
+(`confirming`: yes/no; `collecting`: fill the one pending slot).
+
+**Unrelated question mid-action** — answered for real via
+`qa.answer_question`, with a reminder of what's still pending appended, and
+the slots already collected are never touched. Blocking ("finish this
+first") punishes a reasonable aside; silently dropping the action throws
+away information the user already gave. Answering-then-reminding is a
+strict improvement over both, and is exactly the case the spec calls out as
+where these systems "usually break." Detected for free, via Slice 3's
+**rule layer only** (never the LLM fallback): a greeting always counts, and
+a faq/event_inquiry rule match only counts alongside a literal `?` — slot
+content in this domain routinely mentions club vocabulary on purpose
+(feedback naming the team it's about, a wrong/misremembered event name), so
+a bare keyword hit alone is too weak a signal and would false-positive
+constantly.
+
+**Abandonment** — two explicit paths:
+
+1. A cancel keyword (`cancel`, `never mind`, `stop`, `abort`, `forget it`),
+   checked first on every turn, ends the action immediately.
+2. An idle-turn cap (`config.ACTION_IDLE_TURN_LIMIT = 6`): interruptions and
+   failed slot attempts increment a counter; crossing it auto-abandons. This
+   is the safety net for a user who wanders off mid-action without ever
+   typing `cancel`, which would otherwise leave state open indefinitely —
+   the orphaned-state failure mode the spec warns these systems fall into.
+
+Both persist an `abandoned` record with a reason (`user_cancelled` /
+`idle_timeout` / `rejected_at_confirmation` — the last from explicitly
+declining the confirmation step below).
+
+### KB validation
+
+An event slot only fills through `_match_event`, matched against a
+structured `EVENTS` list in `backend/kb_data.py` (name/date/status/aliases,
+additive alongside the existing verbatim KB text). An event that doesn't
+match any real KB entry is flagged and left unfilled, never silently
+accepted. The status rule differs **by action**, deliberately: registration
+requires `Upcoming` (you cannot sign up for something that already
+happened — "Registering for a Completed event should also be flagged");
+feedback accepts any real event regardless of status, since feedback is
+most useful for an event that already happened.
+
+### Confirmation
+
+Once every slot is filled, the bot states every collected value explicitly
+and asks for `yes`/`no` before persisting anything — the one place a
+mis-transcribed email gets caught before it's written down. `no` discards
+the action (`rejected_at_confirmation`, no partial edit flow — restart with
+corrected details).
+
+### Persistence
+
+`ActionRecordStore` (`backend/actions.py`) appends one JSON-Lines record to
+`data/actions_log.jsonl` per terminal transition — timestamp, action type,
+captured slots, and status (`completed` / `abandoned`, with a reason on the
+latter). Append-only, never read-modify-write, so a record is written
+exactly once and there is never a half-written line to recover from on
+restart. `tests/test_actions.py::test_records_survive_a_fresh_store_instance_pointed_at_the_same_file`
+proves this by pointing a brand-new `ActionRecordStore` at the same file a
+prior one wrote to — the durability a real process restart provides.
+
+### Integration with Slice 3 intent classification
+
+`action_request` routes here. Confidence is `not_applicable` for every
+action turn (`config.CONFIDENCE_REASON_ACTION_TURN`), reusing
+`confidence.not_applicable` exactly as a refusal does — an action turn
+asserts no claim about the club, so "how much should you trust this" has no
+answer.
+
+`backend.actions.handle_turn` classifies intent **at most once per turn**:
+a session with no active action pays for exactly the one `intent.classify`
+call it always would have; when that resolves to anything other than
+`action_request`, the same result is threaded into `qa.answer_question` via
+a new optional `precomputed_intent` parameter so it is never classified
+twice. Without this, routing through the action layer would silently double
+the classification cost of every ordinary Q&A turn.
+
+### Quota cost
+
+Zero added LLM calls for the happy path — slot extraction and every state
+transition (cancel/confirm/switch-block) are pure regex, and the interruption
+check reuses only Slice 3's free rule layer. The only place a call is
+*conditionally* spent is arbitrating "unrelated interruption" vs. "invalid
+slot value" on a failed match — and that's the same one classify() call any
+other message would already cost, not an addition, given precomputed_intent
+above. `tests/test_actions.py::test_full_registration_flow_makes_zero_llm_calls`
+runs a complete registration end to end with no LLM entry point mocked at
+all, relying on `tests/conftest.py`'s network-blocking fixture to fail
+loudly if that claim is ever wrong.
+
+### Tests
+
+`tests/test_actions.py` covers: partial info in the opening message,
+zero-LLM-call happy paths for both actions, confirmation and rejection,
+invalid/completed-event validation (and that feedback is exempt from the
+Completed check), unrelated interruption (with and without a `?`, and the
+no-false-positive case for slot content mentioning club vocabulary),
+switch-attempt blocking, explicit cancel from both stages, idle-timeout
+auto-abandonment, persistence across a simulated restart, and that the
+router never double-classifies a non-action turn.

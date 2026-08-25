@@ -1,6 +1,6 @@
 """Unit tests for `backend.cli.main` (the interactive REPL).
 
-`input()` and `backend.cli.answer_question` are monkeypatched so these tests
+`input()` and `backend.cli.handle_turn` are monkeypatched so these tests
 run with no terminal interaction, no network access, and no ANTHROPIC_API_KEY.
 """
 
@@ -21,7 +21,7 @@ def _run_cli(inputs, monkeypatch, capsys, fake_answer_question):
             raise EOFError
 
     monkeypatch.setattr("builtins.input", fake_input)
-    monkeypatch.setattr("backend.cli.answer_question", fake_answer_question)
+    monkeypatch.setattr("backend.cli.handle_turn", fake_answer_question)
 
     main()
 
@@ -112,6 +112,28 @@ def test_grounded_result_prints_source_format(monkeypatch, capsys):
     assert "Rahul Sharma leads AIML." in result.out
     assert "[source=Teams | score=0.693]" in result.out
     # The refused-path branch must not have also fired.
+    assert "[refused" not in result.out
+
+
+def test_action_turn_prints_action_tag_not_source_none(monkeypatch, capsys):
+    """An action turn has refused=False and source_section=None (Slice 5) --
+    the CLI must print "[action]", not the misleading "[source=None ...]"
+    the generic branch would otherwise produce."""
+
+    def fake_answer_question(query, session_id):
+        return AnswerResult(
+            answer="Which event would you like to register for?",
+            source_section=None,
+            score=0.0,
+            refused=False,
+            intent="action_request",
+            intent_path="rule",
+        )
+
+    result = _run_cli(["Register me for HackFest", "quit"], monkeypatch, capsys, fake_answer_question)
+
+    assert "[action]" in result.out
+    assert "[source=" not in result.out
     assert "[refused" not in result.out
 
 

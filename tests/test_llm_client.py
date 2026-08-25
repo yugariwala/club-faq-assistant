@@ -14,6 +14,7 @@ import pytest
 
 from backend import llm_client
 from backend.config import ANTHROPIC_MODEL, GEMINI_MODEL
+from backend.memory import Turn
 
 
 def _anthropic_block(block_type: str, text: str | None = None) -> SimpleNamespace:
@@ -284,3 +285,134 @@ def test_both_providers_return_identical_shape_for_identical_answer_text(monkeyp
 
     assert type(anthropic_result) is type(gemini_result) is str
     assert anthropic_result == gemini_result
+
+
+# ---------------------------------------------------------------------------
+# rewrite_query
+# ---------------------------------------------------------------------------
+
+
+def test_rewrite_query_short_circuits_on_empty_history(monkeypatch):
+    """Nothing to resolve against -> no provider call at all (spec Code Map:
+    "empty history short-circuits (no call)")."""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("should never be used")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.rewrite_query("When is that?", [])
+
+    client.models.generate_content.assert_not_called()
+    assert result == "When is that?"
+
+
+def test_rewrite_query_builds_prompt_from_history_and_uses_rewrite_system_prompt(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("When is the Cloud Study Jam?")
+    history = [
+        Turn(
+            user_message="Tell me about the Cloud Study Jam",
+            answer="The Cloud Study Jam is on Sept 20.",
+            source_section="Events",
+        )
+    ]
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.rewrite_query("When is that?", history)
+
+    _, kwargs = client.models.generate_content.call_args
+    assert kwargs["config"].system_instruction == llm_client.REWRITE_SYSTEM_PROMPT
+    assert kwargs["config"].system_instruction != llm_client.SYSTEM_PROMPT
+    assert "Tell me about the Cloud Study Jam" in kwargs["contents"]
+    assert "The Cloud Study Jam is on Sept 20." in kwargs["contents"]
+    assert "When is that?" in kwargs["contents"]
+    assert result == "When is the Cloud Study Jam?"
+
+
+def test_rewrite_query_includes_multiple_history_turns_in_order(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("stub")
+    history = [
+        Turn(user_message="Tell me about Cloud team", answer="Sneha Gupta leads Cloud.", source_section="Teams"),
+        Turn(user_message="What about AIML?", answer="Rahul Sharma leads AIML.", source_section="Teams"),
+    ]
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        llm_client.rewrite_query("Who leads it?", history)
+
+    _, kwargs = client.models.generate_content.call_args
+    contents = kwargs["contents"]
+    assert contents.index("Tell me about Cloud team") < contents.index("What about AIML?")
+    assert contents.index("What about AIML?") < contents.index("Who leads it?")
+
+
+def test_rewrite_query_uses_anthropic_when_selected(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    client = _mock_anthropic_client(
+        _anthropic_response([_anthropic_block("text", "When is the Cloud Study Jam?")])
+    )
+    history = [Turn(user_message="q", answer="a", source_section="Events")]
+
+    with patch("backend.llm_client._get_anthropic_client", return_value=client):
+        result = llm_client.rewrite_query("When is that?", history)
+
+    _, kwargs = client.messages.create.call_args
+    assert kwargs["system"] == llm_client.REWRITE_SYSTEM_PROMPT
+    assert result == "When is the Cloud Study Jam?"
+
+
+def test_rewrite_query_strips_whitespace_from_result(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("  When is the Cloud Study Jam?  \n")
+    history = [Turn(user_message="q", answer="a", source_section="Events")]
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.rewrite_query("When is that?", history)
+
+    assert result == "When is the Cloud Study Jam?"
+
+
+def test_rewrite_query_falls_back_to_original_on_provider_failure(monkeypatch):
+    """Provider failure falls back to the original query, never raises
+    (spec Code Map: "provider failure falls back to the original query
+    unchanged")."""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = MagicMock()
+    client.models.generate_content.side_effect = RuntimeError("boom")
+    history = [Turn(user_message="q", answer="a", source_section="Events")]
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.rewrite_query("When is that?", history)
+
+    assert result == "When is that?"
+
+
+def test_rewrite_query_falls_back_to_original_when_result_is_blank(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("   ")
+    history = [Turn(user_message="q", answer="a", source_section="Events")]
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.rewrite_query("When is that?", history)
+
+    assert result == "When is that?"
+
+
+def test_rewrite_query_falls_back_to_original_when_response_text_is_none(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = MagicMock()
+    client.models.generate_content.return_value = SimpleNamespace(text=None)
+    history = [Turn(user_message="q", answer="a", source_section="Events")]
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.rewrite_query("When is that?", history)
+
+    assert result == "When is that?"
+
+
+def test_rewrite_query_falls_back_to_original_on_unknown_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    history = [Turn(user_message="q", answer="a", source_section="Events")]
+
+    result = llm_client.rewrite_query("When is that?", history)
+
+    assert result == "When is that?"

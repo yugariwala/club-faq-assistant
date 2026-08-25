@@ -9,3 +9,19 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-slice-1-kb-grounded-qa.md`
   summary: Decide how a retrieval-successful-but-LLM-call-failed outcome should be surfaced/counted once intent classification and the dashboard exist (currently encoded only in AnswerResult.answer text with refused=False, source_section/score preserved).
   evidence: Edge-case-hunter review of Slice 1 flagged that an empty-text LLM response would silently look like a valid grounded answer. The Slice 1 patch fixed the crash risk (qa.py now catches LLM-call exceptions and returns a distinct LLM_ERROR_MESSAGE), but whether this LLM-error state needs its own field/bucket is a design decision for the confidence-scoring and dashboard "unanswered queries" work in later slices, not something Slice 1's spec covers.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-slice-2-multi-turn-memory.md`
+  summary: README.md is now further stale for Slice 2 -- it still describes Slice 1 only, with no mention of `session_id`, `MAX_HISTORY_TURNS`, the query-rewrite step, or that a grounded multi-turn follow-up now costs up to two LLM calls (rewrite + generate) instead of one.
+  evidence: Blind-hunter review of Slice 2 found README.md unchanged from Slice 1. Compounds the existing README deferred-work entry above; per that entry's precedent, README maintenance is scoped to submission-prep rather than each slice's own acceptance criteria.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-slice-2-multi-turn-memory.md`
+  summary: `backend/memory.SessionStore` has no thread-safety/locking around `add_turn`/`get_history`, and no eviction/TTL across distinct `session_id`s -- `_sessions` grows unbounded for the life of the process.
+  evidence: Blind-hunter and edge-case-hunter reviews of Slice 2 both flagged this. Not a defect for the current single-threaded CLI consumer, but will need attention once a concurrent multi-session frontend (e.g. a Streamlit dashboard, a later slice) is built.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-slice-2-multi-turn-memory.md`
+  summary: No sanitization/bounding of user input before interpolating it into LLM prompts; Slice 2 doubles the free-text surface fed to the model (the follow-up query and the accumulated conversation history, via `rewrite_query`) on top of Slice 1's already-unsanitized `generate_answer` prompt.
+  evidence: Blind-hunter review of Slice 2 flagged this. Inherits Slice 1's existing trust model unchanged (no new precedent set), but is worth a dedicated security-review pass before submission given the larger prompt-injection surface.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-slice-1-kb-grounded-qa.md`
+  summary: `TfidfRetriever.retrieve()` is called from `qa.answer_question` with no try/except; if it ever raised, the exception would propagate uncaught out of `answer_question` and (as of Slice 2) skip recording that turn to session history.
+  evidence: Blind-hunter review of Slice 2 surfaced this while reading `qa.py`, but the unwrapped call predates Slice 2 -- `retrieve()` was already called without error handling in Slice 1, and nothing in either spec asks for retrieval-layer error handling.

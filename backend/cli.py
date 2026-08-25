@@ -6,11 +6,18 @@ LLM_PROVIDER=anthropic) in the environment for grounded answers; refusals
 never call the LLM so they work without one.
 """
 
+import uuid
+
 from backend.qa import answer_question
 
 
 def main() -> None:
-    print("GDG On Campus Club FAQ Assistant (Slice 1: KB-grounded Q&A)")
+    # One session_id per REPL run, so this run's whole conversation shares
+    # one bounded history (spec: Code Map -> "generate one session_id per
+    # REPL run; pass it to every answer_question call").
+    session_id = uuid.uuid4().hex
+
+    print("GDG On Campus Club FAQ Assistant (Slice 2: multi-turn memory)")
     print("Ask a question about the club, or type 'quit' / 'exit' to stop.\n")
 
     while True:
@@ -25,7 +32,10 @@ def main() -> None:
         if not query:
             continue
 
-        result = answer_question(query)
+        result = answer_question(query, session_id)
+
+        if result.rewritten_query and result.rewritten_query != query:
+            print("[rewritten: {}]".format(result.rewritten_query))
 
         print(result.answer)
         if result.refused:

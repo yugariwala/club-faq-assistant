@@ -9,9 +9,13 @@ can be swapped without touching qa.py or any retrieval/grounding/refusal
 logic there.
 """
 
+import logging
 import os
 
 from backend.config import ANTHROPIC_MODEL, DEFAULT_LLM_PROVIDER, GEMINI_MODEL
+from backend.memory import Turn
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are the GDG On Campus club FAQ assistant. Answer the user's question "
@@ -20,6 +24,24 @@ SYSTEM_PROMPT = (
     "and do not guess. If the provided context does not actually contain the "
     "answer, say so plainly instead of fabricating one. Keep answers concise "
     "and factual."
+)
+
+# System prompt for `rewrite_query`. Resolution is scoped strictly to the
+# given history -- never invents an antecedent (spec: Design Notes ->
+# "Anti-fabrication guardrail"). Returning the query unchanged when it can't
+# be resolved lets the untouched Slice-1 threshold check refuse it exactly
+# like any other ungrounded query, rather than rewrite_query ever having to
+# decide "in scope or not" itself.
+REWRITE_SYSTEM_PROMPT = (
+    "You rewrite a user's follow-up question into a standalone question, "
+    "using ONLY the conversation history provided below to resolve pronouns "
+    "and ellipsis (e.g. \"it\", \"that\", \"who leads it\"). Do not use any "
+    "outside knowledge, and do not invent, assume, or introduce any fact "
+    "that is not explicitly present in the history. If the history does "
+    "not contain enough information to resolve the follow-up, return the "
+    "follow-up question EXACTLY as given, unchanged -- never guess at an "
+    "antecedent. Respond with ONLY the rewritten (or unchanged) question, "
+    "nothing else -- no explanation, no quotation marks, no extra text."
 )
 
 # Fixed low temperature for providers that expose the knob, so grounding
@@ -75,14 +97,30 @@ def _build_user_message(query: str, section: str, content: str) -> str:
     return f"Context ({section} section):\n{content}\n\nQuestion: {query}"
 
 
-def _generate_anthropic(user_message: str) -> str:
+def _build_rewrite_message(query: str, history: list[Turn]) -> str:
+    """Build the single user-turn string given to the rewrite LLM call.
+
+    Renders each prior turn as a user/assistant exchange, in order, followed
+    by the incoming follow-up -- the only material `rewrite_query`'s system
+    prompt permits it to resolve references from (spec: Design Notes ->
+    "Anti-fabrication guardrail"). `history` is expected non-empty; callers
+    (`rewrite_query`, and `qa.answer_question` upstream of it) are
+    responsible for skipping the call entirely when there's no history.
+    """
+    turns = "\n\n".join(
+        f"User: {turn.user_message}\nAssistant: {turn.answer}" for turn in history
+    )
+    return f"Conversation history:\n{turns}\n\nFollow-up question: {query}"
+
+
+def _generate_anthropic(user_message: str, system_prompt: str) -> str:
     import anthropic
 
     try:
         response = _get_anthropic_client().messages.create(
             model=ANTHROPIC_MODEL,
             max_tokens=1024,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             output_config={"effort": "low"},
             messages=[{"role": "user", "content": user_message}],
         )
@@ -94,7 +132,7 @@ def _generate_anthropic(user_message: str) -> str:
     return "".join(block.text for block in response.content if block.type == "text")
 
 
-def _generate_gemini(user_message: str) -> str:
+def _generate_gemini(user_message: str, system_prompt: str) -> str:
     from google.genai import errors, types
 
     try:
@@ -102,7 +140,7 @@ def _generate_gemini(user_message: str) -> str:
             model=GEMINI_MODEL,
             contents=user_message,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
+                system_instruction=system_prompt,
                 temperature=GEMINI_TEMPERATURE,
             ),
         )
@@ -135,4 +173,35 @@ def generate_answer(query: str, section: str, content: str) -> str:
             f"Unknown LLM_PROVIDER {provider!r}; expected 'anthropic' or 'gemini'"
         ) from None
 
-    return generate(_build_user_message(query, section, content))
+    return generate(_build_user_message(query, section, content), SYSTEM_PROMPT)
+
+
+def rewrite_query(query: str, history: list[Turn]) -> str:
+    """Rewrite `query` into a standalone question using `history` to resolve
+    pronouns/ellipsis (e.g. "When is that?").
+
+    Empty history short-circuits with no provider call at all -- there's
+    nothing to resolve against (spec: Code Map -> "empty history
+    short-circuits (no call)"). Any failure reaching or parsing the
+    provider (including an unknown LLM_PROVIDER) falls back to the original
+    `query`, unchanged, rather than raising into `qa.answer_question` --
+    worst case is then a normal Slice-1-style refusal on the unrewritten
+    query, never a crash and never a fabricated resolution (spec: Design
+    Notes -> "Anti-fabrication guardrail").
+    """
+    if not history:
+        return query
+
+    provider = os.environ.get("LLM_PROVIDER", DEFAULT_LLM_PROVIDER).strip().lower()
+    generate = _PROVIDERS.get(provider)
+    if generate is None:
+        return query
+
+    try:
+        rewritten = generate(_build_rewrite_message(query, history), REWRITE_SYSTEM_PROMPT)
+    except Exception:
+        logger.exception("llm_client.rewrite_query failed for query=%r", query)
+        return query
+
+    rewritten = rewritten.strip() if rewritten else ""
+    return rewritten if rewritten else query

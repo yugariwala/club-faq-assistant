@@ -29,7 +29,7 @@ def _run_cli(inputs, monkeypatch, capsys, fake_answer_question):
 def test_quit_terminates_loop_without_calling_answer_question(monkeypatch, capsys):
     calls = []
 
-    def fake_answer_question(query):
+    def fake_answer_question(query, session_id):
         calls.append(query)
         raise AssertionError("answer_question should not be called for 'quit'")
 
@@ -42,7 +42,7 @@ def test_quit_terminates_loop_without_calling_answer_question(monkeypatch, capsy
 def test_exit_terminates_loop_without_calling_answer_question(monkeypatch, capsys):
     calls = []
 
-    def fake_answer_question(query):
+    def fake_answer_question(query, session_id):
         calls.append(query)
         raise AssertionError("answer_question should not be called for 'exit'")
 
@@ -55,7 +55,7 @@ def test_exit_terminates_loop_without_calling_answer_question(monkeypatch, capsy
 def test_quit_uppercase_terminates_loop(monkeypatch, capsys):
     calls = []
 
-    def fake_answer_question(query):
+    def fake_answer_question(query, session_id):
         calls.append(query)
         raise AssertionError("answer_question should not be called for 'QUIT'")
 
@@ -67,7 +67,7 @@ def test_quit_uppercase_terminates_loop(monkeypatch, capsys):
 def test_empty_and_whitespace_input_is_skipped_without_crashing(monkeypatch, capsys):
     calls = []
 
-    def fake_answer_question(query):
+    def fake_answer_question(query, session_id):
         calls.append(query)
         return AnswerResult(answer="stub", source_section="Teams", score=0.5, refused=False)
 
@@ -80,7 +80,7 @@ def test_empty_and_whitespace_input_is_skipped_without_crashing(monkeypatch, cap
 
 
 def test_refused_result_prints_refused_format(monkeypatch, capsys):
-    def fake_answer_question(query):
+    def fake_answer_question(query, session_id):
         return AnswerResult(
             answer="I don't have that information in the club's knowledge base.",
             source_section=None,
@@ -97,7 +97,7 @@ def test_refused_result_prints_refused_format(monkeypatch, capsys):
 
 
 def test_grounded_result_prints_source_format(monkeypatch, capsys):
-    def fake_answer_question(query):
+    def fake_answer_question(query, session_id):
         return AnswerResult(
             answer="Rahul Sharma leads AIML.",
             source_section="Teams",
@@ -111,3 +111,50 @@ def test_grounded_result_prints_source_format(monkeypatch, capsys):
     assert "[source=Teams | score=0.693]" in result.out
     # The refused-path branch must not have also fired.
     assert "[refused" not in result.out
+
+
+def test_all_calls_in_one_run_share_the_same_session_id(monkeypatch, capsys):
+    """One session_id is generated per REPL run and passed to every
+    answer_question call in that run (spec Code Map: "generate one
+    session_id per REPL run; pass it to every answer_question call")."""
+    session_ids = []
+
+    def fake_answer_question(query, session_id):
+        session_ids.append(session_id)
+        return AnswerResult(answer="stub", source_section="Teams", score=0.5, refused=False)
+
+    _run_cli(["first question", "second question", "quit"], monkeypatch, capsys, fake_answer_question)
+
+    assert len(session_ids) == 2
+    assert session_ids[0] == session_ids[1]
+    assert session_ids[0] != ""
+
+
+def test_rewritten_query_is_printed_when_it_differs_from_original(monkeypatch, capsys):
+    def fake_answer_question(query, session_id):
+        return AnswerResult(
+            answer="Sept 20.",
+            source_section="Events",
+            score=0.5,
+            refused=False,
+            rewritten_query="When is the Cloud Study Jam?",
+        )
+
+    result = _run_cli(["When is that?", "quit"], monkeypatch, capsys, fake_answer_question)
+
+    assert "[rewritten: When is the Cloud Study Jam?]" in result.out
+
+
+def test_rewritten_query_is_not_printed_when_unchanged(monkeypatch, capsys):
+    def fake_answer_question(query, session_id):
+        return AnswerResult(
+            answer="Rahul Sharma leads AIML.",
+            source_section="Teams",
+            score=0.5,
+            refused=False,
+            rewritten_query="Who leads the AIML team?",
+        )
+
+    result = _run_cli(["Who leads the AIML team?", "quit"], monkeypatch, capsys, fake_answer_question)
+
+    assert "[rewritten:" not in result.out

@@ -32,6 +32,14 @@ REFUSAL_MESSAGE: str = (
     "events, recruitment, rules, contacts, or achievements."
 )
 
+# Maximum number of prior turns retained per session and available to
+# `llm_client.rewrite_query` for reference resolution. Read at call time by
+# `memory.SessionStore.add_turn` (not baked into a fixed-size structure at
+# session creation) so tuning this value changes trimming behavior for every
+# existing session immediately (spec: "History window is bounded by one
+# named constant, read at call time").
+MAX_HISTORY_TURNS: int = 5
+
 # Fixed message returned when retrieval found a relevant KB section (so this
 # is NOT a below-threshold refusal) but the call into `llm_client` itself
 # failed -- auth failure, network error, rate limit, malformed response,

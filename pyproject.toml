@@ -1,0 +1,25 @@
+[project]
+name = "gdg-club-faq-assistant"
+version = "0.1.0"
+description = "GDG On Campus Club FAQ Assistant -- Slice 1: Knowledge Base & Grounded Q&A"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.40.0",
+    "google-genai>=2.19.0",
+    "scikit-learn>=1.5.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["backend"]

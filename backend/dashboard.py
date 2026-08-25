@@ -75,35 +75,53 @@ if "session_id" not in st.session_state:
 
 # --- Chat tab ------------------------------------------------------------
 
+# Explicit avatars rather than Streamlit's near-identical defaults, so a long
+# exchange stays scannable as question / answer.
+_AVATARS = {"user": "🙋", "assistant": "🤖"}
+
 
 def _metadata_lines(result: AnswerResult) -> list[str]:
     """The per-response metadata the CLI prints, as display lines.
 
     Mirrors the printing block in `backend.cli.main` -- same fields, same
-    formats, same three-way split between a refusal, an agentic-action turn
-    (no KB section grounds a prompt/confirmation message, and "source=None"
-    would read as a bug), and a grounded answer.
+    three-way split between a refusal, an agentic-action turn (no KB section
+    grounds a prompt/confirmation message, and "source=None" would read as a
+    bug), and a grounded answer.
+
+    The CLI's surrounding "[...]" markers are dropped: `_muted` wraps each
+    line in a `:gray[...]` span, which a nested "]" would close early, and
+    the muted styling already separates these from the answer text.
     """
     if result.refused:
-        lines = ["[refused | no source | score={:.3f}]".format(result.score)]
+        lines = ["refused | no source | score={:.3f}".format(result.score)]
     elif result.source_section is None:
-        lines = ["[action]"]
+        lines = ["action turn | no source"]
     else:
-        lines = ["[source={} | score={:.3f}]".format(result.source_section, result.score)]
+        lines = ["source={} | score={:.3f}".format(result.source_section, result.score)]
 
-    lines.append("[intent={} | path={}]".format(result.intent, result.intent_path))
+    lines.append("intent={} | path={}".format(result.intent, result.intent_path))
     if result.confidence:
         # Band and raw score together -- the band alone hides how close a
         # `medium` sat to either edge.
-        lines.append("[confidence={}]".format(result.confidence.display()))
+        lines.append("confidence={}".format(result.confidence.display()))
         if result.confidence.claims:
             lines.append(
-                "[grounding={}/{} claims verified]".format(
+                "grounding={}/{} claims verified".format(
                     result.confidence.supported_claims,
                     len(result.confidence.claims),
                 )
             )
     return lines
+
+
+def _muted(line: str) -> str:
+    """One metadata line as a small, muted annotation.
+
+    `st.caption` supplies the smaller type; the `:gray[...]` span supplies a
+    colour that reads as an annotation on the answer rather than as more body
+    text. Callers must pass bracket-free text -- a "]" inside closes the span.
+    """
+    return ":gray[{}]".format(line)
 
 
 def _answer_prompt(prompt: str) -> None:
@@ -123,7 +141,7 @@ def _answer_prompt(prompt: str) -> None:
             {
                 "role": "assistant",
                 "content": "Something went wrong on that turn -- see club_faq_assistant.log.",
-                "meta": ["[error]"],
+                "meta": ["error"],
             }
         )
         return
@@ -155,6 +173,15 @@ def _reset_conversation() -> None:
 
 
 def render_chat() -> None:
+    st.subheader("Ask about the club")
+    st.markdown(
+        "Answers questions from the club handbook -- **intro, teams, events, "
+        "recruitment, rules, contacts and achievements** -- and cites the "
+        "section each answer came from. It can also **register you for an "
+        "event** or **record event feedback**, asking for whatever details it "
+        "still needs. When nothing in the handbook matches, it says so rather "
+        "than guessing."
+    )
     st.caption(
         "Same engine as the CLI (`backend.actions.handle_turn`). Every turn is "
         "written to the log the Dashboard tab reads."
@@ -189,14 +216,14 @@ def render_chat() -> None:
         if not st.session_state.messages:
             st.info("No messages yet. Ask something like *When does the AIML team meet?*")
         for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
+            with st.chat_message(message["role"], avatar=_AVATARS[message["role"]]):
                 if message.get("rewritten"):
-                    st.caption("[rewritten: {}]".format(message["rewritten"]))
+                    st.caption(_muted("rewritten: {}".format(message["rewritten"])))
                 st.markdown(message["content"])
                 if message.get("meta"):
                     # Two trailing spaces = a markdown hard break, so the
                     # metadata stacks one field per line as it does in the CLI.
-                    st.caption("  \n".join(message["meta"]))
+                    st.caption("  \n".join(_muted(line) for line in message["meta"]))
 
 
 # --- Dashboard tab -------------------------------------------------------

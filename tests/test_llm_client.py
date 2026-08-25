@@ -266,6 +266,118 @@ def test_gemini_api_error_raises_llm_provider_error(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Quota/rate-limit error classification (distinct from generic failures, so
+# qa.py can surface a distinct user-facing message for each)
+# ---------------------------------------------------------------------------
+
+
+def test_gemini_429_raises_llm_quota_error(monkeypatch):
+    from google.genai import errors
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = MagicMock()
+    client.models.generate_content.side_effect = errors.ClientError(
+        429, {"error": {"message": "RESOURCE_EXHAUSTED"}}
+    )
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        with pytest.raises(llm_client.LLMQuotaError):
+            llm_client.generate_answer("q", "Teams", "content")
+
+
+def test_gemini_non_429_error_raises_plain_llm_provider_error_not_quota(monkeypatch):
+    from google.genai import errors
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = MagicMock()
+    client.models.generate_content.side_effect = errors.ClientError(
+        400, {"error": {"message": "bad request"}}
+    )
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        with pytest.raises(llm_client.LLMProviderError) as exc_info:
+            llm_client.generate_answer("q", "Teams", "content")
+
+    assert not isinstance(exc_info.value, llm_client.LLMQuotaError)
+
+
+def test_anthropic_rate_limit_raises_llm_quota_error(monkeypatch):
+    import anthropic
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    client = MagicMock()
+    client.messages.create.side_effect = anthropic.RateLimitError(
+        "rate limited", response=MagicMock(), body=None
+    )
+
+    with patch("backend.llm_client._get_anthropic_client", return_value=client):
+        with pytest.raises(llm_client.LLMQuotaError):
+            llm_client.generate_answer("q", "Teams", "content")
+
+
+def test_anthropic_non_rate_limit_error_raises_plain_llm_provider_error_not_quota(monkeypatch):
+    import anthropic
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    client = MagicMock()
+    client.messages.create.side_effect = anthropic.BadRequestError(
+        "bad request", response=MagicMock(), body=None
+    )
+
+    with patch("backend.llm_client._get_anthropic_client", return_value=client):
+        with pytest.raises(llm_client.LLMProviderError) as exc_info:
+            llm_client.generate_answer("q", "Teams", "content")
+
+    assert not isinstance(exc_info.value, llm_client.LLMQuotaError)
+
+
+# ---------------------------------------------------------------------------
+# missing_api_key_var (startup key-presence check)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_api_key_var_returns_gemini_var_when_unset(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    assert llm_client.missing_api_key_var() == "GEMINI_API_KEY"
+
+
+def test_missing_api_key_var_returns_none_when_gemini_key_set(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "some-key")
+
+    assert llm_client.missing_api_key_var() is None
+
+
+def test_missing_api_key_var_treats_blank_key_as_missing(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "   ")
+
+    assert llm_client.missing_api_key_var() == "GEMINI_API_KEY"
+
+
+def test_missing_api_key_var_returns_anthropic_var_when_selected_and_unset(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    assert llm_client.missing_api_key_var() == "ANTHROPIC_API_KEY"
+
+
+def test_missing_api_key_var_defaults_to_gemini_when_provider_unset(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    assert llm_client.missing_api_key_var() == "GEMINI_API_KEY"
+
+
+def test_missing_api_key_var_returns_none_for_unknown_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+
+    assert llm_client.missing_api_key_var() is None
+
+
+# ---------------------------------------------------------------------------
 # Cross-provider parity
 # ---------------------------------------------------------------------------
 

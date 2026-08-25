@@ -32,16 +32,55 @@ SYSTEM_PROMPT = (
 # be resolved lets the untouched Slice-1 threshold check refuse it exactly
 # like any other ungrounded query, rather than rewrite_query ever having to
 # decide "in scope or not" itself.
+#
+# Few-shot examples cover two distinct resolution patterns, not just one:
+# pronoun coreference ("who leads it?") AND elliptical topic switches
+# ("what about Cloud?", "and who leads that one?") that name a new entity
+# without a pronoun at all. A health-check run found the plain instruction
+# above resolved pronouns reliably but left "what about X?" unresolved,
+# causing a false refusal on an answerable, in-scope follow-up -- these
+# examples close that gap. The last example is a negative case (nothing in
+# history resolves the follow-up), reinforcing the anti-fabrication
+# guardrail rather than making the model over-eager to resolve everything.
 REWRITE_SYSTEM_PROMPT = (
     "You rewrite a user's follow-up question into a standalone question, "
     "using ONLY the conversation history provided below to resolve pronouns "
-    "and ellipsis (e.g. \"it\", \"that\", \"who leads it\"). Do not use any "
-    "outside knowledge, and do not invent, assume, or introduce any fact "
-    "that is not explicitly present in the history. If the history does "
-    "not contain enough information to resolve the follow-up, return the "
+    "and ellipsis (e.g. \"it\", \"that\", \"who leads it\", \"what about "
+    "X?\", \"and that one?\"). An elliptical topic switch that names a new "
+    "entity but omits the rest of the question (e.g. \"what about Cloud?\" "
+    "right after a question about a team) still needs to be resolved into a "
+    "standalone question about that entity, using the same topic as the "
+    "prior turn -- do not treat naming a new entity as automatically "
+    "unresolvable just because it isn't a pronoun. Do not use any outside "
+    "knowledge, and do not invent, assume, or introduce any fact that is "
+    "not explicitly present in the history. If the history does not "
+    "contain enough information to resolve the follow-up, return the "
     "follow-up question EXACTLY as given, unchanged -- never guess at an "
     "antecedent. Respond with ONLY the rewritten (or unchanged) question, "
-    "nothing else -- no explanation, no quotation marks, no extra text."
+    "nothing else -- no explanation, no quotation marks, no extra text.\n\n"
+    "Examples:\n\n"
+    "Conversation history:\n"
+    "User: Tell me about the AIML team\n"
+    "Assistant: AIML is led by Rahul Sharma.\n\n"
+    "Follow-up question: Who leads it?\n"
+    "Rewritten: Who leads the AIML team?\n\n"
+    "Conversation history:\n"
+    "User: Tell me about the AIML team\n"
+    "Assistant: AIML is led by Rahul Sharma.\n\n"
+    "Follow-up question: What about Cloud?\n"
+    "Rewritten: Who leads the Cloud team?\n\n"
+    "Conversation history:\n"
+    "User: Tell me about the AIML team\n"
+    "Assistant: AIML is led by Rahul Sharma.\n"
+    "User: What about Cloud?\n"
+    "Assistant: Sneha Gupta leads the Cloud team.\n\n"
+    "Follow-up question: And who leads that one?\n"
+    "Rewritten: Who leads the Cloud team?\n\n"
+    "Conversation history:\n"
+    "User: Tell me about the AIML team\n"
+    "Assistant: AIML is led by Rahul Sharma.\n\n"
+    "Follow-up question: What's the club's budget?\n"
+    "Rewritten: What's the club's budget?"
 )
 
 # Fixed low temperature for providers that expose the knob, so grounding
@@ -61,6 +100,38 @@ class LLMProviderError(RuntimeError):
     fabricated answer, so a failed call can never look like a successful one
     to the caller (qa.py treats this as the in-scope "couldn't reach the
     model" path, distinct from the below-threshold refusal path)."""
+
+
+class LLMQuotaError(LLMProviderError):
+    """Raised specifically when a provider rejects a call for being
+    rate-limited or out of quota (HTTP 429), as opposed to any other
+    failure. qa.py surfaces this as a distinct user-facing message
+    (`config.LLM_QUOTA_MESSAGE`) so "out of quota" doesn't read the same as
+    "the app is broken" (`config.LLM_ERROR_MESSAGE`)."""
+
+
+# Maps the LLM_PROVIDER value to the env var that must be set for that
+# provider. Single source of truth for `missing_api_key_var` below.
+_PROVIDER_API_KEY_VARS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+}
+
+
+def missing_api_key_var() -> str | None:
+    """Return the name of the env var required by the currently configured
+    LLM_PROVIDER if it's unset or blank, or None if the provider is
+    correctly configured.
+
+    An unrecognized LLM_PROVIDER value returns None here -- that failure is
+    already surfaced clearly at call time by `generate_answer` raising
+    `LLMProviderError`, so it isn't this function's job to re-detect it.
+    """
+    provider = os.environ.get("LLM_PROVIDER", DEFAULT_LLM_PROVIDER).strip().lower()
+    var_name = _PROVIDER_API_KEY_VARS.get(provider)
+    if var_name is None:
+        return None
+    return None if os.environ.get(var_name, "").strip() else var_name
 
 
 def _get_anthropic_client():
@@ -124,6 +195,8 @@ def _generate_anthropic(user_message: str, system_prompt: str) -> str:
             output_config={"effort": "low"},
             messages=[{"role": "user", "content": user_message}],
         )
+    except anthropic.RateLimitError as exc:
+        raise LLMQuotaError(f"Anthropic API rate limit/quota exceeded: {exc}") from exc
     except anthropic.APIError as exc:
         raise LLMProviderError(f"Anthropic API call failed: {exc}") from exc
 
@@ -145,6 +218,8 @@ def _generate_gemini(user_message: str, system_prompt: str) -> str:
             ),
         )
     except errors.APIError as exc:
+        if getattr(exc, "code", None) == 429:
+            raise LLMQuotaError(f"Gemini API rate limit/quota exceeded: {exc}") from exc
         raise LLMProviderError(f"Gemini API call failed: {exc}") from exc
 
     return response.text or ""

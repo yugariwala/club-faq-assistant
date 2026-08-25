@@ -158,3 +158,26 @@ def test_rewritten_query_is_not_printed_when_unchanged(monkeypatch, capsys):
     result = _run_cli(["Who leads the AIML team?", "quit"], monkeypatch, capsys, fake_answer_question)
 
     assert "[rewritten:" not in result.out
+
+
+def test_startup_warns_when_api_key_missing(monkeypatch, capsys):
+    monkeypatch.setattr("backend.cli.llm_client.missing_api_key_var", lambda: "GEMINI_API_KEY")
+
+    def fake_answer_question(query, session_id):
+        return AnswerResult(answer="stub", source_section="Teams", score=0.5, refused=False)
+
+    result = _run_cli(["quit"], monkeypatch, capsys, fake_answer_question)
+
+    assert "WARNING" in result.out
+    assert "GEMINI_API_KEY" in result.out
+
+
+def test_startup_prints_no_warning_when_api_key_present(monkeypatch, capsys):
+    monkeypatch.setattr("backend.cli.llm_client.missing_api_key_var", lambda: None)
+
+    def fake_answer_question(query, session_id):
+        return AnswerResult(answer="stub", source_section="Teams", score=0.5, refused=False)
+
+    result = _run_cli(["quit"], monkeypatch, capsys, fake_answer_question)
+
+    assert "WARNING" not in result.out

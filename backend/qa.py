@@ -99,9 +99,25 @@ def answer_question(
     else:
         try:
             answer_text = llm_client.generate_answer(rewritten_query, top.section, top.content)
+        except llm_client.LLMQuotaError:
+            # Rate-limited/out-of-quota is a distinct, expected-during-heavy-
+            # use failure mode -- surfaced with its own message so it doesn't
+            # read as "the app is broken" the way a generic failure does.
+            logger.exception(
+                "llm_client.generate_answer hit a quota/rate-limit error for "
+                "rewritten_query=%r",
+                rewritten_query,
+            )
+            result = AnswerResult(
+                answer=config.LLM_QUOTA_MESSAGE,
+                source_section=top.section,
+                score=top.score,
+                refused=False,
+                rewritten_query=rewritten_query,
+            )
         except Exception:
-            # Any failure reaching or parsing the LLM (auth, network, rate
-            # limit, malformed response, ...) degrades gracefully instead of
+            # Any other failure reaching or parsing the LLM (auth, network,
+            # malformed response, ...) degrades gracefully instead of
             # crashing the caller (e.g. the CLI REPL). This is NOT the
             # below-threshold refusal path -- retrieval found a relevant KB
             # section (refused stays False, source_section/score are

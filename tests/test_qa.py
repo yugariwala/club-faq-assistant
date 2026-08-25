@@ -11,7 +11,7 @@ their own session_id's history turn by turn within the test itself.
 import logging
 from unittest.mock import patch
 
-from backend import config
+from backend import config, llm_client
 from backend.memory import SessionStore, Turn
 from backend.qa import AnswerResult, answer_question
 
@@ -112,6 +112,28 @@ def test_llm_call_failure_degrades_gracefully_without_crashing():
     assert result.source_section == "Teams"
     assert result.score >= config.RETRIEVAL_THRESHOLD
     assert result.answer == config.LLM_ERROR_MESSAGE
+    assert result.answer != config.REFUSAL_MESSAGE
+
+
+def test_llm_quota_error_returns_distinct_quota_message_not_generic_error():
+    """A rate-limit/quota failure (LLMQuotaError) must surface
+    config.LLM_QUOTA_MESSAGE, not the generic config.LLM_ERROR_MESSAGE --
+    "out of quota" and "something is broken" are different situations for
+    the user, per the same in-scope/not-refused contract as any other
+    LLM-call failure."""
+    with patch(
+        "backend.qa.llm_client.generate_answer",
+        side_effect=llm_client.LLMQuotaError("rate limited"),
+    ) as mock_generate:
+        result = answer_question("Who leads the AIML team?", session_id="test-llm-quota")
+
+    mock_generate.assert_called_once()
+    assert isinstance(result, AnswerResult)
+    assert result.refused is False
+    assert result.source_section == "Teams"
+    assert result.score >= config.RETRIEVAL_THRESHOLD
+    assert result.answer == config.LLM_QUOTA_MESSAGE
+    assert result.answer != config.LLM_ERROR_MESSAGE
     assert result.answer != config.REFUSAL_MESSAGE
 
 

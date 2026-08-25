@@ -48,3 +48,13 @@ MAX_HISTORY_TURNS: int = 5
 LLM_ERROR_MESSAGE: str = (
     "I couldn't reach the model right now. Please try again in a moment."
 )
+
+# Fixed message returned when the LLM call itself failed specifically
+# because the provider is rate-limited or out of quota (HTTP 429), as
+# distinct from any other failure. Kept separate from LLM_ERROR_MESSAGE so
+# "out of quota, try again shortly" doesn't read the same as "something is
+# broken" to the user.
+LLM_QUOTA_MESSAGE: str = (
+    "The model is temporarily rate-limited or out of quota, not broken -- "
+    "please try again in a minute."
+)

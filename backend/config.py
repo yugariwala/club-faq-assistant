@@ -176,3 +176,16 @@ ACTION_IDLE_TURN_LIMIT: int = 6
 # or test suite is invoked from.
 ACTIONS_LOG_DIR: str = "data"
 ACTIONS_LOG_FILENAME: str = "actions_log.jsonl"
+
+# --- Persisted per-turn log (requirements.md §3.2, §3.4, Slice 6) -----------
+
+# Directory/filename for the persisted per-turn log (JSON Lines, one record
+# per `actions.handle_turn` call -- every chat turn, grounded/refused/action
+# alike). Same resolution convention as ACTIONS_LOG_DIR/FILENAME above: fixed
+# relative to the project root, not the process's current working directory.
+# This is what the Slice 6 dashboard reads for chat stats, intent breakdown,
+# confidence distribution, and unanswered queries -- intent/confidence were
+# already logged per-turn to the text log (Slices 3-4), but only here, not
+# discarded, in a form the dashboard can query.
+TURN_LOG_DIR: str = "data"
+TURN_LOG_FILENAME: str = "turns_log.jsonl"

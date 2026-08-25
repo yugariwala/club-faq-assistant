@@ -27,6 +27,11 @@ this" has no answer, same reasoning as a refusal
 State machine and interruption/abandonment policy are explained in the
 module-level docstrings of `_continue_action` and `_looks_like_interruption`
 below; see also README.md "Agentic actions (Slice 5)".
+
+`handle_turn` also persists one `backend.turn_log` record per call, whichever
+of the three branches produced the result -- the Slice 6 dashboard's chat
+stats, intent breakdown, confidence distribution, and unanswered-queries
+panels all read that log; see README.md "Dashboard (Slice 6)".
 """
 
 import json
@@ -42,6 +47,7 @@ from backend.kb_data import EVENTS
 from backend.memory import SessionStore
 from backend.qa import AnswerResult
 from backend.retrieval import TfidfRetriever
+from backend.turn_log import TurnLogStore, record_turn
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +174,7 @@ def _now_iso() -> str:
 # tests already use for those.
 _active_action_store = ActiveActionStore()
 _action_record_store = ActionRecordStore()
+_turn_log_store = TurnLogStore()
 
 
 # ---------------------------------------------------------------------------
@@ -751,6 +758,7 @@ def handle_turn(
     session_store: SessionStore | None = None,
     active_action_store: ActiveActionStore | None = None,
     record_store: ActionRecordStore | None = None,
+    turn_log_store: TurnLogStore | None = None,
 ) -> AnswerResult:
     """Single per-turn entrypoint: route to the action state machine or to
     plain KB Q&A, and return a uniform `AnswerResult` either way.
@@ -763,19 +771,29 @@ def handle_turn(
     `precomputed_intent` so it is never classified twice (spec: "keep slot
     extraction as cheap as possible" -- the router itself must not double
     the cost of every ordinary QA turn to get there).
+
+    Every call also persists one record to the turn log (Slice 6's dashboard
+    dependency, `backend.turn_log`) -- regardless of which of the three
+    branches below produced the result, so a completed/abandoned action's
+    own turns and a plain refusal are logged exactly the same way a grounded
+    answer is.
     """
     action_store = active_action_store if active_action_store is not None else _active_action_store
     records = record_store if record_store is not None else _action_record_store
+    turn_log = turn_log_store if turn_log_store is not None else _turn_log_store
 
     active = action_store.get(session_id)
     if active is not None:
-        return _continue_action(query, session_id, active, action_store, records, retriever, session_store)
+        result = _continue_action(query, session_id, active, action_store, records, retriever, session_store)
+    else:
+        intent_result = intent.classify(query)
+        if intent_result.label == "action_request":
+            result = _start_action(query, session_id, intent_result, action_store)
+        else:
+            result = qa.answer_question(
+                query, session_id, retriever=retriever, session_store=session_store,
+                precomputed_intent=intent_result,
+            )
 
-    intent_result = intent.classify(query)
-    if intent_result.label == "action_request":
-        return _start_action(query, session_id, intent_result, action_store)
-
-    return qa.answer_question(
-        query, session_id, retriever=retriever, session_store=session_store,
-        precomputed_intent=intent_result,
-    )
+    record_turn(turn_log, session_id, query, result)
+    return result

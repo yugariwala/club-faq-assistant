@@ -11,6 +11,8 @@ interruption answered via `qa.answer_question`) mocks `llm_client.generate_answe
 exactly like `tests/test_qa.py` does.
 """
 
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -23,6 +25,14 @@ from backend.actions import (
     handle_turn,
 )
 from backend.qa import AnswerResult
+from backend.turn_log import TurnLogStore
+
+# One process-wide scratch directory for every test's turn-log writes below
+# -- these tests don't inspect turn-log contents (tests/test_turn_log.py
+# does), they just must never touch the real data/turns_log.jsonl that
+# `handle_turn`'s default would otherwise write to.
+_TEST_TURN_LOG_DIR = tempfile.TemporaryDirectory()
+_test_turn_log_store = TurnLogStore(Path(_TEST_TURN_LOG_DIR.name) / "turns_log.jsonl")
 
 
 @pytest.fixture
@@ -36,7 +46,8 @@ def stores(tmp_path):
 
 def _turn(query, session_id, action_store, record_store):
     return handle_turn(
-        query, session_id, active_action_store=action_store, record_store=record_store
+        query, session_id, active_action_store=action_store, record_store=record_store,
+        turn_log_store=_test_turn_log_store,
     )
 
 
@@ -559,3 +570,69 @@ def test_active_action_store_clear_is_idempotent():
     store.clear("s1")
     store.clear("s1")  # must not raise
     assert store.get("s1") is None
+
+
+# ---------------------------------------------------------------------------
+# Turn log persistence (Slice 6 dependency)
+# ---------------------------------------------------------------------------
+
+
+def test_handle_turn_persists_an_action_turn_to_the_turn_log(stores, tmp_path):
+    action_store, record_store = stores
+    turn_log_store = TurnLogStore(tmp_path / "turns_log.jsonl")
+
+    handle_turn(
+        "Register me for HackFest", "s-turnlog",
+        active_action_store=action_store, record_store=record_store,
+        turn_log_store=turn_log_store,
+    )
+
+    records = turn_log_store.read_all()
+    assert len(records) == 1
+    assert records[0]["session_id"] == "s-turnlog"
+    assert records[0]["query"] == "Register me for HackFest"
+    assert records[0]["intent"] == "action_request"
+    assert records[0]["refused"] is False
+    assert records[0]["source_section"] is None
+    assert records[0]["confidence_band"] == config.CONFIDENCE_BAND_NOT_APPLICABLE_NAME
+    assert "timestamp" in records[0]
+
+
+def test_handle_turn_persists_one_record_per_turn_across_a_flow(stores, tmp_path):
+    action_store, record_store = stores
+    turn_log_store = TurnLogStore(tmp_path / "turns_log.jsonl")
+    session_id = "s-turnlog-flow"
+
+    handle_turn(
+        "Register me for HackFest", session_id,
+        active_action_store=action_store, record_store=record_store, turn_log_store=turn_log_store,
+    )
+    handle_turn(
+        "Yug Ariwala", session_id,
+        active_action_store=action_store, record_store=record_store, turn_log_store=turn_log_store,
+    )
+
+    assert len(turn_log_store.read_all()) == 2
+
+
+def test_handle_turn_persists_a_refused_turn_to_the_turn_log(stores, tmp_path):
+    """A below-threshold refusal must still be logged -- it's exactly what
+    the dashboard's "unanswered queries" panel reads (requirements.md
+    §3.4). No LLM call is needed: refusals never reach one, and rule-abstained
+    intent classification falls back to `out_of_scope` internally when the
+    network is blocked (tests/conftest.py)."""
+    action_store, record_store = stores
+    turn_log_store = TurnLogStore(tmp_path / "turns_log.jsonl")
+
+    result = handle_turn(
+        "What's the club's budget?", "s-turnlog-refused",
+        active_action_store=action_store, record_store=record_store, turn_log_store=turn_log_store,
+    )
+
+    assert result.refused is True
+    records = turn_log_store.read_all()
+    assert len(records) == 1
+    assert records[0]["refused"] is True
+    assert records[0]["query"] == "What's the club's budget?"
+    assert records[0]["confidence_band"] == config.CONFIDENCE_BAND_NOT_APPLICABLE_NAME
+    assert records[0]["confidence_reason"] == config.CONFIDENCE_REASON_REFUSED

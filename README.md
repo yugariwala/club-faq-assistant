@@ -9,6 +9,7 @@ every message with an intent category.
 - **Slice 3** — hybrid intent classification (rules + LLM fallback).
 - **Slice 4** — composite confidence scoring (retrieval separation + grounding verification).
 - **Slice 5** — agentic actions (event registration, feedback submission).
+- **Slice 6** — dashboard (chat stats, intent breakdown, actions log, unanswered queries).
 
 ## Setup
 
@@ -55,6 +56,14 @@ uv run python -m backend.cli
 
 Refusals (queries with no relevant KB match) never call the LLM, so the CLI
 works without any API key for those.
+
+To also see the dashboard, run it alongside the CLI in a second terminal:
+
+```bash
+uv run streamlit run backend/dashboard.py
+```
+
+See [Dashboard (Slice 6)](#dashboard-slice-6) below.
 
 ## Tests
 
@@ -468,3 +477,70 @@ no-false-positive case for slot content mentioning club vocabulary),
 switch-attempt blocking, explicit cancel from both stages, idle-timeout
 auto-abandonment, persistence across a simulated restart, and that the
 router never double-classifies a non-action turn.
+
+## Dashboard (Slice 6)
+
+```bash
+uv run streamlit run backend/dashboard.py
+```
+
+Read-only Streamlit app (`backend/dashboard.py`) over two persisted,
+append-only JSON-Lines logs -- it never calls `handle_turn` itself, so it
+needs no API key and makes no LLM calls, and it can run in a second terminal
+at the same time as the CLI:
+
+- **`data/turns_log.jsonl`** (`backend/turn_log.py`) -- one record per chat
+  turn: timestamp, session_id, raw + rewritten query, classified intent and
+  which path resolved it, refused flag, cited source section, and the
+  confidence band/score/reason. Written from exactly one place,
+  `backend.actions.handle_turn` (the single per-turn entrypoint every real
+  turn -- QA or action -- passes through), so it's a full log of what
+  `backend.cli` actually did, never a sample or a mock.
+- **`data/actions_log.jsonl`** (`backend/actions.py`, Slice 5) -- one record
+  per completed/abandoned action; read as-is, unchanged.
+
+Four panels, tables and counts only -- no charts, no filters:
+
+1. **Chat stats** -- total sessions (distinct `session_id`) and total
+   messages (`len(turns_log)`).
+2. **Intent breakdown** -- counts per intent label, plus the rule-path vs.
+   LLM-path split (`intent_path`). A third path, `action_state`, appears
+   alongside `rule`/`llm`: it's a turn resolved by the action state machine
+   (a slot fill, a yes/no) rather than a fresh `intent.classify` call --
+   shown separately rather than folded into `rule`, since no rule actually
+   ran for it.
+3. **Actions log** -- every record from `data/actions_log.jsonl` as-is:
+   timestamp, action type, captured slots (flattened to `key=value`), and
+   status (`completed` / `abandoned`, with its reason).
+4. **Unanswered queries** -- every turn with `refused=True`, i.e. the query
+   never cleared `RETRIEVAL_THRESHOLD` and the bot said so rather than
+   guessing. This is the gap-analysis list: what real questions the KB
+   doesn't cover yet.
+
+Plus **confidence band distribution** (Slice 4's `high`/`medium`/`low`/
+`not_applicable`, counted straight from `turns_log.jsonl`), since it's
+already logged per-turn and the dashboard is the natural place to see how
+it's actually distributed across real usage rather than only the eval set.
+
+### Why the turn log needed building first
+
+Intent and confidence were already logged per-turn from Slice 3/4 onward,
+but only to the free-text `logger.info` log (`club_faq_assistant.log`) --
+readable for debugging a single run, not queryable for "how many `faq`
+turns happened across every session." `backend/turn_log.py` (`TurnLogStore`,
+`record_turn`) is the structured, persisted counterpart this slice depended
+on (tracked as exactly that in `deferred-work.md` since Slice 1). Same
+persistence shape as `ActionRecordStore`: append-only JSON Lines, one write
+per terminal event, so a record is written exactly once and there's never a
+half-written line to recover from after a restart --
+`tests/test_turn_log.py::test_records_survive_a_fresh_store_instance_pointed_at_the_same_file`
+proves this the same way the Slice 5 test does for actions.
+
+`record_turn` is called from exactly one place, `handle_turn` itself, after
+whichever of its three branches (continue an action / start an action /
+plain `qa.answer_question`) produced a result -- so every real chat turn is
+logged uniformly regardless of path, and evaluation scripts
+(`scripts/eval_intents.py`, `scripts/eval_grounding.py`), which call
+`qa.answer_question`/`intent.classify` directly, never touch this log: an
+offline eval run isn't real chat usage, and "chat stats" would be wrong if
+it counted one.

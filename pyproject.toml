@@ -8,6 +8,7 @@ dependencies = [
     "google-genai>=2.19.0",
     "python-dotenv>=1.0.0",
     "scikit-learn>=1.5.0",
+    "streamlit>=1.38.0",
 ]
 
 [dependency-groups]

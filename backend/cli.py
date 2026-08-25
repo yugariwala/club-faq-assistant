@@ -46,7 +46,7 @@ def main() -> None:
     # REPL run; pass it to every answer_question call").
     session_id = uuid.uuid4().hex
 
-    print("GDG On Campus Club FAQ Assistant (Slice 2: multi-turn memory)")
+    print("GDG On Campus Club FAQ Assistant (Slice 3: intent classification)")
     print("Ask a question about the club, or type 'quit' / 'exit' to stop.\n")
 
     while True:
@@ -73,6 +73,7 @@ def main() -> None:
             print(
                 "[source={} | score={:.3f}]".format(result.source_section, result.score)
             )
+        print("[intent={} | path={}]".format(result.intent, result.intent_path))
         print()
 
 

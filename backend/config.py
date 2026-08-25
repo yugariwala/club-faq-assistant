@@ -58,3 +58,22 @@ LLM_QUOTA_MESSAGE: str = (
     "The model is temporarily rate-limited or out of quota, not broken -- "
     "please try again in a minute."
 )
+
+# The exact five intent categories every user message is tagged with
+# (requirements.md §3.2). The LLM fallback (backend/llm_client.classify_intent)
+# is constrained to return one of these labels, nothing else.
+INTENT_LABELS: frozenset[str] = frozenset(
+    {"faq", "event_inquiry", "action_request", "out_of_scope", "greeting"}
+)
+
+# Fallback label used only when the LLM classification path exhausts
+# INTENT_CLASSIFY_MAX_ATTEMPTS with no valid label (unparseable response, or
+# the call itself fails every attempt). Never a positive claim about what
+# the user wants -- "couldn't determine" is closest in spirit to "not
+# answerable", not to any specific actionable/informational category.
+DEFAULT_INTENT_ON_LLM_FAILURE: str = "out_of_scope"
+
+# Number of attempts (including the first) classify_intent/classify_intents_batch
+# make against the LLM before giving up and returning
+# DEFAULT_INTENT_ON_LLM_FAILURE for whatever couldn't be parsed.
+INTENT_CLASSIFY_MAX_ATTEMPTS: int = 2

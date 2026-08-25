@@ -11,8 +11,16 @@ logic there.
 
 import logging
 import os
+import re
 
-from backend.config import ANTHROPIC_MODEL, DEFAULT_LLM_PROVIDER, GEMINI_MODEL
+from backend.config import (
+    ANTHROPIC_MODEL,
+    DEFAULT_INTENT_ON_LLM_FAILURE,
+    DEFAULT_LLM_PROVIDER,
+    GEMINI_MODEL,
+    INTENT_CLASSIFY_MAX_ATTEMPTS,
+    INTENT_LABELS,
+)
 from backend.memory import Turn
 
 logger = logging.getLogger(__name__)
@@ -81,6 +89,50 @@ REWRITE_SYSTEM_PROMPT = (
     "Assistant: AIML is led by Rahul Sharma.\n\n"
     "Follow-up question: What's the club's budget?\n"
     "Rewritten: What's the club's budget?"
+)
+
+# System prompt shared by `classify_intent` and `classify_intents_batch`.
+# Constrained to return exactly one of the five labels (spec: "Constrained
+# output -- the model returns one of the five labels, nothing else").
+# Few-shot examples deliberately include the event_inquiry/action_request
+# boundary case, since that's where the rule layer in backend/intent.py
+# also abstains and defers here.
+CLASSIFY_SYSTEM_PROMPT = (
+    "You classify a single user message from the GDG On Campus club "
+    "chatbot into exactly ONE of these five intent categories:\n\n"
+    "faq - general club info: rules, achievements, the club intro, teams, "
+    "contacts, recruitment process (not about one specific event).\n"
+    "event_inquiry - a question about a specific event or events in "
+    "general (what/when/where/status), asked informationally.\n"
+    "action_request - the user wants something done on their behalf right "
+    "now: register/sign up for something, submit feedback, set a "
+    "reminder, check a status -- phrased as a request to act, not just a "
+    "question.\n"
+    "out_of_scope - the topic itself isn't part of the club's domain at "
+    "all (unrelated to teams/events/rules/recruitment/contacts/"
+    "achievements, or unrelated to the club entirely).\n"
+    "greeting - a greeting, thanks, or goodbye with no other content.\n\n"
+    "Classify by the TOPIC of the question, not by whether you personally "
+    "know the answer -- a question about a team or event is faq/"
+    "event_inquiry even if the specific detail asked for isn't something "
+    "you'd know.\n\n"
+    "Respond with ONLY the single matching category name, exactly as "
+    "spelled above, in lowercase, with no punctuation, no explanation, "
+    "and nothing else.\n\n"
+    "Examples:\n"
+    "Message: What teams does the club have?\nCategory: faq\n\n"
+    "Message: When is HackFest 2025?\nCategory: event_inquiry\n\n"
+    "Message: Is HackFest still open for registration?\n"
+    "Category: event_inquiry\n\n"
+    "Message: Register me for HackFest\nCategory: action_request\n\n"
+    "Message: Can I still sign up for HackFest?\n"
+    "Category: action_request\n\n"
+    "Message: I'd like to submit feedback about the last workshop\n"
+    "Category: action_request\n\n"
+    "Message: What's the club's budget?\nCategory: out_of_scope\n\n"
+    "Message: Can you help me with my calculus homework?\n"
+    "Category: out_of_scope\n\n"
+    "Message: Hey, thanks so much!\nCategory: greeting"
 )
 
 # Fixed low temperature for providers that expose the knob, so grounding
@@ -184,6 +236,45 @@ def _build_rewrite_message(query: str, history: list[Turn]) -> str:
     return f"Conversation history:\n{turns}\n\nFollow-up question: {query}"
 
 
+def _build_classify_message(query: str) -> str:
+    return f"Message: {query}\nCategory:"
+
+
+def _parse_intent_label(raw: str) -> str | None:
+    """Normalize a raw model response into one of config.INTENT_LABELS, or
+    None if it isn't one after stripping whitespace/punctuation -- the
+    caller decides whether to retry or fall back (spec: "Reject and retry
+    on anything outside the enum")."""
+    cleaned = raw.strip().lower().strip(" .!\"'")
+    return cleaned if cleaned in INTENT_LABELS else None
+
+
+def _build_batch_classify_message(queries: list[str]) -> str:
+    numbered = "\n".join(f"{i}. {q}" for i, q in enumerate(queries, start=1))
+    return (
+        f"Classify each of the following {len(queries)} messages. Respond "
+        f"with exactly {len(queries)} lines, one category per line, in the "
+        'same order, formatted as "<number>. <category>" -- nothing else, '
+        "no blank lines, no commentary.\n\n"
+        f"{numbered}"
+    )
+
+
+def _parse_batch_intent_labels(raw: str, expected_count: int) -> list[str | None]:
+    """Parse a numbered "<n>. <category>" batch response into a
+    positional list of labels (None where a line is missing/unparseable),
+    tolerant of the model reordering or dropping lines."""
+    labels: list[str | None] = [None] * expected_count
+    for line in (raw or "").splitlines():
+        match = re.match(r"^\s*(\d+)\.\s*(.+?)\s*$", line)
+        if not match:
+            continue
+        index = int(match.group(1)) - 1
+        if 0 <= index < expected_count:
+            labels[index] = _parse_intent_label(match.group(2))
+    return labels
+
+
 def _generate_anthropic(user_message: str, system_prompt: str) -> str:
     import anthropic
 
@@ -280,3 +371,89 @@ def rewrite_query(query: str, history: list[Turn]) -> str:
 
     rewritten = rewritten.strip() if rewritten else ""
     return rewritten if rewritten else query
+
+
+def classify_intent(query: str) -> str:
+    """Classify `query` into one of config.INTENT_LABELS via the LLM.
+
+    Never raises -- called only after backend/intent.py's rule layer has
+    already abstained, so this is the last word on an already-uncertain
+    message; any provider failure, or a response that isn't one of the five
+    labels after config.INTENT_CLASSIFY_MAX_ATTEMPTS attempts, falls back to
+    config.DEFAULT_INTENT_ON_LLM_FAILURE rather than propagate into the
+    caller or guess a label it isn't confident about (mirrors
+    rewrite_query's never-raise, anti-fabrication contract).
+    """
+    provider = os.environ.get("LLM_PROVIDER", DEFAULT_LLM_PROVIDER).strip().lower()
+    generate = _PROVIDERS.get(provider)
+    if generate is None:
+        return DEFAULT_INTENT_ON_LLM_FAILURE
+
+    message = _build_classify_message(query)
+    for attempt in range(INTENT_CLASSIFY_MAX_ATTEMPTS):
+        try:
+            raw = generate(message, CLASSIFY_SYSTEM_PROMPT)
+        except Exception:
+            logger.exception(
+                "llm_client.classify_intent attempt %d failed for query=%r",
+                attempt + 1,
+                query,
+            )
+            continue
+
+        label = _parse_intent_label(raw or "")
+        if label is not None:
+            return label
+        logger.warning(
+            "llm_client.classify_intent attempt %d returned unparseable "
+            "label %r for query=%r",
+            attempt + 1,
+            raw,
+            query,
+        )
+
+    return DEFAULT_INTENT_ON_LLM_FAILURE
+
+
+def classify_intents_batch(queries: list[str]) -> list[str]:
+    """Classify many queries in as few LLM calls as possible.
+
+    Built for scripts/eval_intents.py's quota-constrained evaluation runs
+    (the production per-turn path is `classify_intent`, one message at a
+    time) -- one call classifies the whole batch via a numbered-list
+    prompt/response. Any position that never parses to a valid label after
+    config.INTENT_CLASSIFY_MAX_ATTEMPTS whole-batch attempts falls back to
+    config.DEFAULT_INTENT_ON_LLM_FAILURE for that item only; this never
+    raises and always returns exactly len(queries) labels.
+    """
+    if not queries:
+        return []
+
+    provider = os.environ.get("LLM_PROVIDER", DEFAULT_LLM_PROVIDER).strip().lower()
+    generate = _PROVIDERS.get(provider)
+    if generate is None:
+        return [DEFAULT_INTENT_ON_LLM_FAILURE] * len(queries)
+
+    labels: list[str | None] = [None] * len(queries)
+    message = _build_batch_classify_message(queries)
+
+    for attempt in range(INTENT_CLASSIFY_MAX_ATTEMPTS):
+        try:
+            raw = generate(message, CLASSIFY_SYSTEM_PROMPT)
+        except Exception:
+            logger.exception(
+                "llm_client.classify_intents_batch attempt %d failed for %d queries",
+                attempt + 1,
+                len(queries),
+            )
+            continue
+
+        parsed = _parse_batch_intent_labels(raw or "", len(queries))
+        for i, label in enumerate(parsed):
+            if labels[i] is None and label is not None:
+                labels[i] = label
+
+        if all(label is not None for label in labels):
+            break
+
+    return [label if label is not None else DEFAULT_INTENT_ON_LLM_FAILURE for label in labels]

@@ -12,6 +12,7 @@ import logging
 from unittest.mock import patch
 
 from backend import config, llm_client
+from backend.intent import IntentResult
 from backend.memory import SessionStore, Turn
 from backend.qa import AnswerResult, answer_question
 
@@ -367,3 +368,64 @@ def test_session_store_override_is_used_instead_of_module_singleton():
     from backend.qa import _session_store
 
     assert _session_store.get_history(session_id) == []
+
+
+# ---------------------------------------------------------------------------
+# Intent classification (Slice 3)
+# ---------------------------------------------------------------------------
+
+
+def test_grounded_answer_carries_rule_resolved_intent():
+    """A message a rule can classify (here, a named team -> faq) must never
+    reach the LLM classifier, and must attach to the returned AnswerResult."""
+    with patch("backend.qa.intent.llm_client.classify_intent") as mock_classify:
+        with patch("backend.qa.llm_client.generate_answer", return_value="Rahul Sharma."):
+            result = answer_question("Who leads the AIML team?", session_id="test-intent-rule")
+
+    mock_classify.assert_not_called()
+    assert result.intent == "faq"
+    assert result.intent_path == "rule"
+
+
+def test_refusal_still_carries_a_classified_intent():
+    """Intent classification must run (and attach) on the refusal path too,
+    not only on grounded answers."""
+    with patch(
+        "backend.qa.intent.llm_client.classify_intent", return_value="out_of_scope"
+    ) as mock_classify:
+        result = answer_question("What's the club's budget?", session_id="test-intent-refusal")
+
+    mock_classify.assert_called_once()
+    assert result.refused is True
+    assert result.intent == "out_of_scope"
+    assert result.intent_path == "llm"
+
+
+def test_intent_is_classified_from_the_original_query_not_the_rewritten_one():
+    """Intent tags what the user actually typed -- classification must run
+    on the raw incoming query, never the internal rewrite used for
+    retrieval."""
+    session_id = "test-intent-raw-query"
+
+    with patch("backend.qa.llm_client.generate_answer", return_value="stub"):
+        answer_question("Tell me about the Cloud Study Jam", session_id=session_id)
+
+    with patch(
+        "backend.qa.llm_client.rewrite_query", return_value="When is the Cloud Study Jam?"
+    ):
+        with patch("backend.qa.llm_client.generate_answer", return_value="Sept 20."):
+            with patch(
+                "backend.qa.intent.classify", return_value=IntentResult(label="faq", path="rule")
+            ) as mock_intent_classify:
+                answer_question("When is that?", session_id=session_id)
+
+    mock_intent_classify.assert_called_once_with("When is that?")
+
+
+def test_intent_and_path_are_logged_per_turn(caplog):
+    with caplog.at_level(logging.INFO, logger="backend.qa"):
+        with patch("backend.qa.llm_client.generate_answer", return_value="Rahul Sharma."):
+            answer_question("Who leads the AIML team?", session_id="test-intent-logging")
+
+    records = [r.getMessage() for r in caplog.records]
+    assert any("intent='faq'" in m and "intent_path='rule'" in m for m in records)

@@ -160,6 +160,24 @@ def test_rewritten_query_is_not_printed_when_unchanged(monkeypatch, capsys):
     assert "[rewritten:" not in result.out
 
 
+def test_intent_and_path_are_printed_for_every_response(monkeypatch, capsys):
+    def fake_answer_question(query, session_id):
+        return AnswerResult(
+            answer="Rahul Sharma leads AIML.",
+            source_section="Teams",
+            score=0.693,
+            refused=False,
+            intent="faq",
+            intent_path="rule",
+        )
+
+    result = _run_cli(
+        ["Who leads the AIML team?", "quit"], monkeypatch, capsys, fake_answer_question
+    )
+
+    assert "[intent=faq | path=rule]" in result.out
+
+
 def test_startup_warns_when_api_key_missing(monkeypatch, capsys):
     monkeypatch.setattr("backend.cli.llm_client.missing_api_key_var", lambda: "GEMINI_API_KEY")
 

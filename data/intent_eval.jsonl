@@ -1,0 +1,56 @@
+{"query": "What is GDG On Campus?", "label": "faq"}
+{"query": "When was the club founded?", "label": "faq"}
+{"query": "Who leads the AIML team?", "label": "faq"}
+{"query": "What are the club's rules for staying active?", "label": "faq"}
+{"query": "How many events do I need to attend per month to stay active?", "label": "faq"}
+{"query": "What happens if I'm inactive for two months?", "label": "faq"}
+{"query": "Who is the club president?", "label": "faq"}
+{"query": "What's the general contact email for the club?", "label": "faq"}
+{"query": "What awards has the club won?", "label": "faq"}
+{"query": "Tell me about the recruitment process.", "label": "faq"}
+{"query": "How many members are in the Web Dev team?", "label": "faq"}
+{"query": "What programming languages does the AIML team use?", "label": "faq"}
+{"query": "When is HackFest 2025?", "label": "event_inquiry"}
+{"query": "Is HackFest still open for registration?", "label": "event_inquiry"}
+{"query": "Is the Cloud Study Jam still upcoming?", "label": "event_inquiry"}
+{"query": "When does the Design Thinking Bootcamp start?", "label": "event_inquiry"}
+{"query": "Has Flutter Forward already happened?", "label": "event_inquiry"}
+{"query": "What date is the CyberCTF Challenge?", "label": "event_inquiry"}
+{"query": "Tell me about the Intro to GenAI Workshop.", "label": "event_inquiry"}
+{"query": "How many events are upcoming this semester?", "label": "event_inquiry"}
+{"query": "What's on the events calendar?", "label": "event_inquiry"}
+{"query": "Is there a hackathon happening this year?", "label": "event_inquiry"}
+{"query": "What time does HackFest start?", "label": "event_inquiry"}
+{"query": "Who won the last hackathon?", "label": "event_inquiry"}
+{"query": "Register me for HackFest 2025.", "label": "action_request"}
+{"query": "Sign me up for the Cloud Study Jam.", "label": "action_request"}
+{"query": "I want to register for the Design Thinking Bootcamp.", "label": "action_request"}
+{"query": "I'd like to submit feedback about the last workshop.", "label": "action_request"}
+{"query": "Please leave some feedback for the CyberCTF Challenge.", "label": "action_request"}
+{"query": "Remind me about HackFest a day before it starts.", "label": "action_request"}
+{"query": "Set a reminder for the Cloud Study Jam.", "label": "action_request"}
+{"query": "Can I still sign up for HackFest?", "label": "action_request"}
+{"query": "I want to give feedback on the recruitment process.", "label": "action_request"}
+{"query": "Check my registration status for HackFest.", "label": "action_request"}
+{"query": "I'd like to register for the Intro to GenAI Workshop.", "label": "action_request"}
+{"query": "What's the club's budget?", "label": "out_of_scope"}
+{"query": "Can you help me with my calculus homework?", "label": "out_of_scope"}
+{"query": "What's the weather like today?", "label": "out_of_scope"}
+{"query": "Can you recommend a good restaurant nearby?", "label": "out_of_scope"}
+{"query": "What's the capital of France?", "label": "out_of_scope"}
+{"query": "Can you write my resume for me?", "label": "out_of_scope"}
+{"query": "Does the club have a Discord server?", "label": "out_of_scope"}
+{"query": "Can you order me a pizza?", "label": "out_of_scope"}
+{"query": "What's your favorite programming language?", "label": "out_of_scope"}
+{"query": "Can you book me a flight to Goa?", "label": "out_of_scope"}
+{"query": "Can you translate this sentence into French?", "label": "out_of_scope"}
+{"query": "Hi!", "label": "greeting"}
+{"query": "Hello there", "label": "greeting"}
+{"query": "Hey, how's it going?", "label": "greeting"}
+{"query": "Good morning!", "label": "greeting"}
+{"query": "Thanks so much!", "label": "greeting"}
+{"query": "Thank you for the help.", "label": "greeting"}
+{"query": "Bye!", "label": "greeting"}
+{"query": "See you later!", "label": "greeting"}
+{"query": "Ok thanks!", "label": "greeting"}
+{"query": "Yo", "label": "greeting"}

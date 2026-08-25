@@ -528,3 +528,156 @@ def test_rewrite_query_falls_back_to_original_on_unknown_provider(monkeypatch):
     result = llm_client.rewrite_query("When is that?", history)
 
     assert result == "When is that?"
+
+
+# ---------------------------------------------------------------------------
+# classify_intent (Slice 3)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_intent_returns_valid_label_from_first_attempt(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("faq")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.classify_intent("What teams does the club have?")
+
+    assert result == "faq"
+    client.models.generate_content.assert_called_once()
+
+
+def test_classify_intent_strips_punctuation_and_case_from_response(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client(" Event_Inquiry.\n")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.classify_intent("When is HackFest?")
+
+    assert result == "event_inquiry"
+
+
+def test_classify_intent_retries_once_on_unparseable_response_then_succeeds(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = MagicMock()
+    client.models.generate_content.side_effect = [
+        SimpleNamespace(text="I'm not sure, maybe faq?"),
+        SimpleNamespace(text="faq"),
+    ]
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.classify_intent("What teams does the club have?")
+
+    assert result == "faq"
+    assert client.models.generate_content.call_count == 2
+
+
+def test_classify_intent_falls_back_to_default_after_exhausting_retries(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("not a real label")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.classify_intent("gibberish")
+
+    assert result == llm_client.DEFAULT_INTENT_ON_LLM_FAILURE
+    assert client.models.generate_content.call_count == llm_client.INTENT_CLASSIFY_MAX_ATTEMPTS
+
+
+def test_classify_intent_falls_back_to_default_on_provider_failure(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = MagicMock()
+    client.models.generate_content.side_effect = RuntimeError("boom")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.classify_intent("gibberish")
+
+    assert result == llm_client.DEFAULT_INTENT_ON_LLM_FAILURE
+
+
+def test_classify_intent_falls_back_to_default_on_unknown_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+
+    result = llm_client.classify_intent("What teams does the club have?")
+
+    assert result == llm_client.DEFAULT_INTENT_ON_LLM_FAILURE
+
+
+def test_classify_intent_never_returns_a_label_outside_the_enum(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("definitely_not_a_label")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.classify_intent("anything")
+
+    assert result in llm_client.INTENT_LABELS
+
+
+# ---------------------------------------------------------------------------
+# classify_intents_batch (Slice 3 -- eval script quota efficiency)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_intents_batch_empty_list_returns_empty_without_a_call(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+
+    with patch("backend.llm_client._get_gemini_client") as mock_get_client:
+        result = llm_client.classify_intents_batch([])
+
+    assert result == []
+    mock_get_client.assert_not_called()
+
+
+def test_classify_intents_batch_parses_numbered_response_in_order(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("1. faq\n2. event_inquiry\n3. greeting")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.classify_intents_batch(
+            ["What teams?", "When is HackFest?", "Hi!"]
+        )
+
+    assert result == ["faq", "event_inquiry", "greeting"]
+    client.models.generate_content.assert_called_once()
+
+
+def test_classify_intents_batch_tolerates_out_of_order_lines(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("2. greeting\n1. faq")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.classify_intents_batch(["What teams?", "Hi!"])
+
+    assert result == ["faq", "greeting"]
+
+
+def test_classify_intents_batch_retries_only_the_missing_positions(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = MagicMock()
+    client.models.generate_content.side_effect = [
+        SimpleNamespace(text="1. faq\n2. not_a_label"),
+        SimpleNamespace(text="1. faq\n2. greeting"),
+    ]
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.classify_intents_batch(["What teams?", "Hi!"])
+
+    assert result == ["faq", "greeting"]
+    assert client.models.generate_content.call_count == 2
+
+
+def test_classify_intents_batch_falls_back_to_default_for_positions_still_unparsed(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    client = _mock_gemini_client("1. faq\n2. still_broken")
+
+    with patch("backend.llm_client._get_gemini_client", return_value=client):
+        result = llm_client.classify_intents_batch(["What teams?", "gibberish"])
+
+    assert result == ["faq", llm_client.DEFAULT_INTENT_ON_LLM_FAILURE]
+    assert client.models.generate_content.call_count == llm_client.INTENT_CLASSIFY_MAX_ATTEMPTS
+
+
+def test_classify_intents_batch_falls_back_to_default_on_unknown_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+
+    result = llm_client.classify_intents_batch(["a", "b"])
+
+    assert result == [llm_client.DEFAULT_INTENT_ON_LLM_FAILURE] * 2

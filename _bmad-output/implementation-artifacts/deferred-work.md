@@ -25,3 +25,15 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-slice-1-kb-grounded-qa.md`
   summary: `TfidfRetriever.retrieve()` is called from `qa.answer_question` with no try/except; if it ever raised, the exception would propagate uncaught out of `answer_question` and (as of Slice 2) skip recording that turn to session history.
   evidence: Blind-hunter review of Slice 2 surfaced this while reading `qa.py`, but the unwrapped call predates Slice 2 -- `retrieve()` was already called without error handling in Slice 1, and nothing in either spec asks for retrieval-layer error handling.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-slice-3-intent-classification.md`
+  summary: Intent and intent_path are logged per-turn via the existing `logger.info` text log only, not to a persisted structured store (JSONL/DB) the Slice 5 dashboard can query for its intent-breakdown counts. Same gap applies to Slice 2's original/rewritten query logging.
+  evidence: requirements.md §3.2 says intent must be "logged per-turn, not just displayed and discarded (dashboard depends on this)"; requirements.md §3.4 says the dashboard "reads from persisted logs, not a hand-maintained/mocked list." Slice 3's own scope explicitly excludes building the dashboard, and per the existing Slice 1 deferred-work entry above, structured persisted logging is that later slice's dependency, not this one's.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-slice-3-intent-classification.md`
+  summary: Rule keyword lists in `backend/intent.py` (event names, team names, action verbs) are hardcoded and duplicate knowledge already present in `backend/kb_data.py` (event/team names) -- if the KB content ever changes, the rules must be updated by hand in a second place.
+  evidence: Noted during implementation. Not a defect against Slice 3's own acceptance criteria (the KB is fixed per requirements.md §2, "Do not deviate from this document without updating it first"), but worth revisiting if the KB ever becomes dynamic.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-slice-3-intent-classification.md`
+  summary: `data/intent_eval.jsonl`'s gold labels were hand-authored by the same process that wrote the rules, and one boundary condition (`_rule_event_inquiry`'s weak-action-cue check) was tuned specifically so the eval set's ambiguous pair resolves the way the spec's own example described. This is normal for a first eval pass, but the set hasn't been independently reviewed by someone who didn't write the rules -- worth a second pass before citing the 98.2% figure as strong external validation.
+  evidence: Noted during implementation while designing the eval set alongside the rules in the same session.

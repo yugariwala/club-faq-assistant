@@ -8,7 +8,7 @@ layer (spec: Code Map).
 import logging
 from dataclasses import dataclass
 
-from backend import config, llm_client
+from backend import config, intent, llm_client
 from backend.memory import SessionStore, Turn
 from backend.retrieval import RetrievalResult, TfidfRetriever
 
@@ -25,15 +25,19 @@ _session_store = SessionStore()
 class AnswerResult:
     """Uniform result shape for every answer path, grounded or refused
     (spec: "Every answer path ... returns a uniform result shape: answer,
-    source_section, score, refused flag"). `rewritten_query` defaults to
-    ""  so existing keyword-arg construction (e.g. in tests/test_cli.py)
-    that doesn't pass it keeps working unchanged."""
+    source_section, score, refused flag"). `rewritten_query`, `intent`, and
+    `intent_path` default to "" so existing keyword-arg construction (e.g.
+    in tests/test_cli.py) that doesn't pass them keeps working unchanged.
+    `intent` is one of config.INTENT_LABELS; `intent_path` is "rule" or
+    "llm", recording which layer of backend/intent.py resolved it."""
 
     answer: str
     source_section: str | None
     score: float
     refused: bool
     rewritten_query: str = ""
+    intent: str = ""
+    intent_path: str = ""
 
 
 def answer_question(
@@ -76,13 +80,22 @@ def answer_question(
         llm_client.rewrite_query(query, history) if history and query.strip() else query
     )
 
-    # Both the original and rewritten query are logged every turn, whether
-    # or not they differ (spec: Boundaries & Constraints).
+    # Classified on the original raw message, not the rewritten form --
+    # intent is about what the user actually typed, independent of the
+    # internal retrieval-oriented rewrite (spec: Slice 3 requirements.md
+    # §3.2 "every user message is tagged with a category").
+    intent_result = intent.classify(query)
+
+    # Original/rewritten query, classified intent, and which path resolved
+    # it are all logged every turn (spec: Boundaries & Constraints; Slice 3
+    # "log it per-turn -- the dashboard consumes this in Slice 5").
     logger.info(
-        "session_id=%r original_query=%r rewritten_query=%r",
+        "session_id=%r original_query=%r rewritten_query=%r intent=%r intent_path=%r",
         session_id,
         query,
         rewritten_query,
+        intent_result.label,
+        intent_result.path,
     )
 
     candidates: list[RetrievalResult] = active_retriever.retrieve(rewritten_query, top_k=3)
@@ -95,6 +108,8 @@ def answer_question(
             score=top.score if top is not None else 0.0,
             refused=True,
             rewritten_query=rewritten_query,
+            intent=intent_result.label,
+            intent_path=intent_result.path,
         )
     else:
         try:
@@ -114,6 +129,8 @@ def answer_question(
                 score=top.score,
                 refused=False,
                 rewritten_query=rewritten_query,
+                intent=intent_result.label,
+                intent_path=intent_result.path,
             )
         except Exception:
             # Any other failure reaching or parsing the LLM (auth, network,
@@ -132,6 +149,8 @@ def answer_question(
                 score=top.score,
                 refused=False,
                 rewritten_query=rewritten_query,
+                intent=intent_result.label,
+                intent_path=intent_result.path,
             )
         else:
             result = AnswerResult(
@@ -140,6 +159,8 @@ def answer_question(
                 score=top.score,
                 refused=False,
                 rewritten_query=rewritten_query,
+                intent=intent_result.label,
+                intent_path=intent_result.path,
             )
 
     active_store.add_turn(

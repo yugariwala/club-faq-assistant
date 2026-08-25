@@ -24,16 +24,16 @@ GEMINI_API_KEY=your_key_here
 ```
 
 Get a key at [aistudio.google.com](https://aistudio.google.com).
-Run the chatbot:
-
-```bash
-uv run python -m backend.cli
-```
-
-Run the dashboard (separate terminal, works alongside the CLI):
+Run the app — a **Chat** tab and a **Dashboard** tab in one browser window:
 
 ```bash
 uv run streamlit run backend/dashboard.py
+```
+
+The same assistant is also available as a terminal REPL, which can run alongside the app against the same logs:
+
+```bash
+uv run python -m backend.cli
 ```
 
 Run the tests (no API key needed — the LLM is mocked throughout):
@@ -77,7 +77,7 @@ user message
 | `backend/actions.py` | Action state machine, slot-filling, KB validation, persistence |
 | `backend/qa.py` | Orchestrates a turn end to end |
 | `backend/turn_log.py` | Append-only per-turn JSONL log |
-| `backend/dashboard.py` | Streamlit dashboard, read-only |
+| `backend/dashboard.py` | Streamlit app: Chat tab (drives `handle_turn`) + read-only Dashboard tab |
 
 ---
 

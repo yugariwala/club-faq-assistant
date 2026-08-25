@@ -9,19 +9,21 @@ Built for the GDG AI/ML team recruitment task (Round 2).
 ## Setup
 
 Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
+Install dependencies and create your env file:
 
 ```bash
 uv sync
 cp .env.example .env
 ```
 
-Add a Gemini API key to `.env` (get one at [aistudio.google.com](https://aistudio.google.com)):
+Then open `.env` in a text editor and fill in these two values (this is file content, not shell commands):
 
 ```
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=your_key_here
 ```
 
+Get a key at [aistudio.google.com](https://aistudio.google.com).
 Run the chatbot:
 
 ```bash
